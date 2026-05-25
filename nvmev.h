@@ -169,6 +169,7 @@ struct nvmev_config {
 	unsigned int write_trailing; // ns
 };
 
+// one per in-flight command -> worker's state machine
 struct nvmev_io_work {
 	int sqid;
 	int cqid;
@@ -176,17 +177,22 @@ struct nvmev_io_work {
 	int sq_entry;
 	unsigned int command_id;
 
+	// when the host rang the doorbell
 	unsigned long long nsecs_start;
+	// when the emulated device would finish (esitmated time)
 	unsigned long long nsecs_target;
 
+	// timestamps for stats
 	unsigned long long nsecs_enqueue;
 	unsigned long long nsecs_copy_start;
 	unsigned long long nsecs_copy_done;
 	unsigned long long nsecs_cq_filled;
 
+	// phase flag -> completion might be raised before fully copied
 	bool is_copied;
 	bool is_completed;
 
+	/// results writen in nvme_completion
 	unsigned int status;
 	unsigned int result0;
 	unsigned int result1;
@@ -198,6 +204,7 @@ struct nvmev_io_work {
 	unsigned int next, prev;
 };
 
+// one per worker thread
 struct nvmev_io_worker {
 	struct nvmev_io_work *work_queue;
 
@@ -213,7 +220,9 @@ struct nvmev_io_worker {
 	char thread_name[32];
 };
 
+// Top level device
 struct nvmev_dev {
+	// fake PCI bus and device
 	struct pci_bus *virt_bus;
 	void *virtDev;
 	struct pci_header *pcihdr;
@@ -227,6 +236,7 @@ struct nvmev_dev {
 	struct nvmev_config config;
 	struct task_struct *nvmev_dispatcher;
 
+	// kernel virtual pointer to storage area
 	void *storage_mapped;
 
 	struct nvmev_io_worker *io_workers;
@@ -272,7 +282,6 @@ struct nvmev_request {
 struct nvmev_result {
 	uint32_t status;
 	uint64_t nsecs_target;
-	uint64_t result;   /* for Zone Append: allocated SLBA */
 };
 
 struct nvmev_ns {

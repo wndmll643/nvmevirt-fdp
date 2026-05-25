@@ -3,6 +3,7 @@
 #include "nvmev.h"
 #include "conv_ftl.h"
 #include "zns_ftl.h"
+#include "nvme_fdp.h"
 
 #define sq_entry(entry_id) \
 	queue->nvme_sq[SQ_ENTRY_TO_PAGE_NUM(entry_id)][SQ_ENTRY_TO_PAGE_OFFSET(entry_id)]
@@ -316,6 +317,17 @@ static void __nvmev_admin_identify_namespace(int eid)
 	ns->ncap = ns->nsze;
 	ns->nuse = ns->nsze;
 
+#if SUPPORTED_SSD_TYPE(FDP)
+	if (NS_SSD_TYPE(nsid) == SSD_TYPE_FDP) {
+		const uint16_t lbas_per_oneshot = ONESHOT_PAGE_SIZE >> LBA_BITS;
+
+		ns->endgid = cpu_to_le16(NVMEV_FDP_ENDGID);
+		ns->npwg = cpu_to_le16(lbas_per_oneshot - 1);
+		ns->npwa = cpu_to_le16(lbas_per_oneshot - 1);
+		ns->nows = cpu_to_le16(lbas_per_oneshot - 1);
+	}
+#endif
+
 	__make_cq_entry(eid, NVME_SC_SUCCESS);
 }
 
@@ -435,6 +447,10 @@ static void __nvmev_admin_identify_ctrl(int eid)
 	ctrl->mdts = nvmev_vdev->mdts;
 	ctrl->sqes = 0x66;
 	ctrl->cqes = 0x44;
+
+#if SUPPORTED_SSD_TYPE(FDP)
+	ctrl->ctratt = cpu_to_le32(NVME_CTRL_CTRATT_FDPS);
+#endif
 
 	__make_cq_entry(eid, NVME_SC_SUCCESS);
 }

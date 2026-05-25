@@ -174,7 +174,21 @@ struct nvme_id_ns {
 	__le16 nabspf;
 	__u16 rsvd46;
 	__le64 nvmcap[2];
-	__u8 rsvd64[40];
+	/* NVMe 2.0 fields previously covered by rsvd64[40] */
+	__le16 npwg;
+	__le16 npwa;
+	__le16 npdg;
+	__le16 npda;
+	__le16 nows;
+	__le16 mssrl;
+	__le32 mcl;
+	__u8 msrc;
+	__u8 rsvd81[11];
+	__le32 anagrpid;
+	__u8 rsvd96[3];
+	__u8 nsattr;
+	__le16 nvmsetid;
+	__le16 endgid;
 	__u8 nguid[16];
 	__u8 eui64[8];
 	struct nvme_lbaf lbaf[16];

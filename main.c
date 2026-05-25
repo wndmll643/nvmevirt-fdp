@@ -21,6 +21,7 @@
 #include "zns_ftl.h"
 #include "simple_ftl.h"
 #include "kv_ftl.h"
+#include "fdp_ftl.h"
 #include "dma.h"
 
 /****************************************************************
@@ -67,9 +68,11 @@ static unsigned int write_time = 1;
 static unsigned int write_delay = 1;
 static unsigned int write_trailing = 0;
 
+// only related to simple_ftl
 static unsigned int nr_io_units = 8;
 static unsigned int io_unit_shift = 12;
 
+// first cpu = dispatcher, others = io workers
 static char *cpus;
 static unsigned int debug = 0;
 
@@ -213,21 +216,12 @@ static int __validate_configs_arch(void)
 	resv_start_bytes = memmap_start;
 	resv_end_bytes = resv_start_bytes + memmap_size - 1;
 
-	if (e820__mapped_any(resv_start_bytes, resv_end_bytes, E820_TYPE_RAM)) {
+	if (e820__mapped_any(resv_start_bytes, resv_end_bytes, E820_TYPE_RAM) ||
+	    e820__mapped_any(resv_start_bytes, resv_end_bytes, E820_TYPE_RESERVED_KERN)) {
 		NVMEV_ERROR("[mem %#010lx-%#010lx] is usable, not reseved region\n",
 			    (unsigned long)resv_start_bytes, (unsigned long)resv_end_bytes);
 		return -EPERM;
 	}
-
-	// check whether the kernel supports E820_TYPE_RESERVED_KERN first
-	// https://lore.kernel.org/all/20250214090651.3331663-5-rppt@kernel.org/
-#ifdef E820_TYPE_RESERVED_KERN
-	if (e820__mapped_any(resv_start_bytes, resv_end_bytes, E820_TYPE_RESERVED_KERN)) {
-		NVMEV_ERROR("[mem %#010lx-%#010lx] is reserved kernel region\n",
-			    (unsigned long)resv_start_bytes, (unsigned long)resv_end_bytes);
-		return -EPERM;
-	}
-#endif
 
 	if (!e820__mapped_any(resv_start_bytes, resv_end_bytes, E820_TYPE_RESERVED)) {
 		NVMEV_ERROR("[mem %#010lx-%#010lx] is not reseved region\n",
@@ -548,6 +542,8 @@ static void NVMEV_NAMESPACE_INIT(struct nvmev_dev *nvmev_vdev)
 			zns_init_namespace(&ns[i], i, size, ns_addr, disp_no);
 		else if (NS_SSD_TYPE(i) == SSD_TYPE_KV)
 			kv_init_namespace(&ns[i], i, size, ns_addr, disp_no);
+		else if (NS_SSD_TYPE(i) == SSD_TYPE_FDP)
+			fdp_init_namespace(&ns[i], i, size, ns_addr, disp_no);
 		else
 			BUG_ON(1);
 
@@ -576,6 +572,8 @@ static void NVMEV_NAMESPACE_FINAL(struct nvmev_dev *nvmev_vdev)
 			zns_remove_namespace(&ns[i]);
 		else if (NS_SSD_TYPE(i) == SSD_TYPE_KV)
 			kv_remove_namespace(&ns[i]);
+		else if (NS_SSD_TYPE(i) == SSD_TYPE_FDP)
+			fdp_remove_namespace(&ns[i]);
 		else
 			BUG_ON(1);
 	}
@@ -602,6 +600,9 @@ static void __print_base_config(void)
 		break;
 	case WD_ZN540:
 		type = "WD ZN540 ZNS SSD";
+		break;
+	case SAMSUNG_FDP:
+		type = "Samsung-like FDP SSD";
 		break;
 	}
 
