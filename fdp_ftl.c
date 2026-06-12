@@ -22,11 +22,17 @@ static struct {
 	struct {
 		uint8_t type;
 		bool enabled;
-	} events[2];
+	} events[3];
+
+	/* event ring: latest FDP_NR_EVENTS records, overwriting the oldest */
+	struct nvme_fdp_event ring[FDP_NR_EVENTS];
+	uint32_t ring_head;	/* next slot to write */
+	uint32_t nr_events;	/* valid records, capped at FDP_NR_EVENTS */
 } fdp_ctx = {
 	.events = {
 		{ .type = NVME_FDP_EVT_RU_NOT_FULLY_WRITTEN, .enabled = false },
 		{ .type = NVME_FDP_EVT_INVALID_PID, .enabled = false },
+		{ .type = NVME_FDP_EVT_IMPLICIT_MODIFIED_RU, .enabled = false },
 	},
 };
 
@@ -37,6 +43,37 @@ void fdp_init_ctx(uint64_t runs)
 	fdp_ctx.mbe = 0;
 	fdp_ctx.runs = runs;
 	memset(fdp_ctx.ruh_attr, NVME_FDP_RUHA_UNUSED, sizeof(fdp_ctx.ruh_attr));
+	memset(fdp_ctx.ring, 0, sizeof(fdp_ctx.ring));
+	fdp_ctx.ring_head = 0;
+	fdp_ctx.nr_events = 0;
+}
+
+static void fdp_emit_event(uint8_t type, uint8_t flags, uint16_t pid, uint32_t nsid)
+{
+	struct nvme_fdp_event *ev;
+	bool enabled = false;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(fdp_ctx.events); i++) {
+		if (fdp_ctx.events[i].type == type) {
+			enabled = fdp_ctx.events[i].enabled;
+			break;
+		}
+	}
+	if (!enabled)
+		return;
+
+	ev = &fdp_ctx.ring[fdp_ctx.ring_head];
+	memset(ev, 0, sizeof(*ev));
+	ev->type = type;
+	ev->flags = flags;
+	ev->pid = cpu_to_le16(pid);
+	ev->timestamp = cpu_to_le64(local_clock());
+	ev->nsid = cpu_to_le32(nsid);
+
+	fdp_ctx.ring_head = (fdp_ctx.ring_head + 1) % FDP_NR_EVENTS;
+	if (fdp_ctx.nr_events < FDP_NR_EVENTS)
+		fdp_ctx.nr_events++;
 }
 
 static void __fill_fdp_log_configs(uint8_t *log)
@@ -102,10 +139,20 @@ void fdp_get_log_page(uint8_t lid, void *buf, uint32_t len)
 	case NVME_LOG_FDP_STATS:
 		__fill_fdp_log_stats(log);
 		break;
-	case NVME_LOG_FDP_EVENTS:
-		/* Header only until Phase 5 starts queueing events */
-		((struct nvme_fdp_events_log *)log)->n = cpu_to_le32(0);
+	case NVME_LOG_FDP_EVENTS: {
+		struct nvme_fdp_events_log *hdr = (void *)log;
+		struct nvme_fdp_event *out = (void *)(log + sizeof(*hdr));
+		uint32_t i;
+
+		/* 64-byte header + 63 * 64-byte records == PAGE_SIZE exactly */
+		hdr->n = cpu_to_le32(fdp_ctx.nr_events);
+		for (i = 0; i < fdp_ctx.nr_events; i++) {
+			uint32_t slot = (fdp_ctx.ring_head + FDP_NR_EVENTS - 1 - i) %
+					FDP_NR_EVENTS;
+			out[i] = fdp_ctx.ring[slot]; /* most recent first */
+		}
 		break;
+	}
 	default:
 		NVMEV_ASSERT(0);
 	}
@@ -275,6 +322,7 @@ static void init_lines(struct fdp_ftl *fdp_ftl)
 			.id = i,
 			.ipc = 0,
 			.vpc = 0,
+			.ruh = -1,
 			.pos = 0,
 			.entry = LIST_HEAD_INIT(lm->lines[i].entry),
 		};
@@ -346,6 +394,8 @@ static void prepare_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type, uin
 	NVMEV_ASSERT(wp);
 	NVMEV_ASSERT(curline);
 
+	curline->ruh = (io_type == USER_IO) ? (int)ruh : -1;
+
 	*wp = (struct fdp_write_pointer){
 		.curline = curline,
 		.ch = 0,
@@ -402,6 +452,7 @@ static void advance_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type, uin
 	}
 	check_addr(wpp->blk, spp->blks_per_pl);
 	wpp->curline = get_next_free_line(fdp_ftl);
+	wpp->curline->ruh = (io_type == USER_IO) ? (int)ruh : -1;
 	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
 
 	wpp->blk = wpp->curline->id;
@@ -845,6 +896,7 @@ static void mark_line_free(struct fdp_ftl *fdp_ftl, struct ppa *ppa)
 	struct fdp_line *line = get_line(fdp_ftl, ppa);
 	line->ipc = 0;
 	line->vpc = 0;
+	line->ruh = -1;
 	list_add_tail(&line->entry, &lm->free_line_list);
 	lm->free_line_cnt++;
 }
@@ -860,6 +912,11 @@ static int do_gc(struct fdp_ftl *fdp_ftl, bool force)
 	if (!victim_line) {
 		return -1;
 	}
+
+	/* GC is about to move data the host placed via this RUH */
+	if (victim_line->ruh >= 0)
+		fdp_emit_event(NVME_FDP_EVT_IMPLICIT_MODIFIED_RU, NVME_FDP_EVENT_F_PIV,
+			       victim_line->ruh, 0);
 
 	ppa.g.blk = victim_line->id;
 	NVMEV_DEBUG_VERBOSE("GC-ing line:%d,ipc=%d(%d),victim=%d,full=%d,free=%d\n", ppa.g.blk,
@@ -1057,6 +1114,9 @@ static bool fdp_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	 * DSPEC field is the reclaim unit handle index. */
 	if (dtype == NVME_DIRECTIVE_PLACEMENT) {
 		if (dspec >= FDP_NR_RUH) {
+			fdp_emit_event(NVME_FDP_EVT_INVALID_PID,
+				       NVME_FDP_EVENT_F_PIV | NVME_FDP_EVENT_F_NSIDV,
+				       dspec, cmd->rw.nsid);
 			ret->status = NVME_SC_INVALID_FIELD;
 			ret->nsecs_target = req->nsecs_start;
 			return true;

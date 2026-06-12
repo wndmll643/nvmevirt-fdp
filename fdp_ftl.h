@@ -25,6 +25,8 @@ struct fdp_line {
 	int id;
 	int ipc;
 	int vpc;
+	/* RUH this line is (or was last) open for; -1 for GC/free lines */
+	int ruh;
 	struct list_head entry;
 	size_t pos;
 };

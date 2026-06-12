@@ -57,6 +57,11 @@
 #define NVME_FDP_EVT_MEDIA_REALLOCATED		0x80
 #define NVME_FDP_EVT_IMPLICIT_MODIFIED_RU	0x81
 
+/* FDP event record flags */
+#define NVME_FDP_EVENT_F_PIV		(1U << 0)	/* placement ID valid */
+#define NVME_FDP_EVENT_F_NSIDV		(1U << 1)	/* nsid valid */
+#define NVME_FDP_EVENT_F_LV		(1U << 2)	/* location valid */
+
 /* FDP Configurations log (LID 0x20): 16-byte header followed by one or
  * more configuration descriptors, each trailed by per-RUH descriptors. */
 struct nvme_fdp_config_log {

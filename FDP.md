@@ -11,13 +11,15 @@ the existing conventional-SSD path (`conv_ftl`).
 | 2     | FDP capability advertisement in Identify                  | done  |
 | 3     | FDP log pages (configs, RUH usage, stats, events) + features | done |
 | 4     | Per-RUH placement: writes routed by DTYPE=Placement + DSPEC | done |
-| 5     | RU rotation events + statistics lifecycle                 | partial (stats counters live) |
+| 5     | FDP event ring + statistics lifecycle                     | done |
 | 6     | Integration tests + workload comparison vs. conv_ftl       | not started |
 
-After phases 1–4 the device is a functional FDP SSD: placement-directive
+After phases 1–5 the device is a functional FDP SSD: placement-directive
 writes land in per-RUH reclaim units, non-directive writes use RUH 0, invalid
-placement IDs are rejected, and the logs/features report live state. What
-remains is the event ring (Phase 5) and workload validation (Phase 6).
+placement IDs are rejected (and logged as FDP events), GC reclaims emit
+implicitly-modified-RU events, and the logs/features report live state. What
+remains is runtime validation (Phase 6) — everything so far is compile-tested
+only.
 
 ## Phase 1 — build scaffold
 
@@ -91,6 +93,50 @@ Caveats: log transfers are single-PRP (≤ 4 KiB), matching the existing
 NVMeVirt log-page limitation; the FID 0x1E descriptor format is best-effort
 from TP 4146a and should be validated against `nvme fdp set-events` /
 `nvme fdp feature` output during testing.
+
+## Phase 4 — per-RUH placement writes
+
+- `struct fdp_ftl` carries `wp_ruh[FDP_NR_RUH]` — one open line per RUH per
+  FTL partition — plus the GC write pointer. With `SSD_PARTITIONS = 4` and
+  8 RUHs that is 36 open lines device-wide; `gc_thres_lines` was raised to
+  `FDP_NR_RUH + 1` accordingly.
+- `fdp_write` parses DTYPE (CDW12 bits 23:20 = `control` bits 7:4) and DSPEC
+  (CDW13 bits 31:16 = `dsmgmt >> 16`). DTYPE = 2 (placement) routes the write
+  to `wp_ruh[dspec]` and marks that RUH host-specified in the usage log;
+  any other DTYPE routes to RUH 0 (marked controller-specified on first use).
+  Since RGIF = 0, DSPEC is the bare RUH index.
+- DSPEC ≥ `FDP_NR_RUH` fails the write with Invalid Field in Command, per
+  TP 4146a. (The corresponding FDP event is queued from Phase 5.)
+- GC is RUH-agnostic: victim lines come from the shared pool regardless of
+  which RUH originally filled them, and GC writes use the dedicated GC
+  write pointer. LPN striping across the 4 partitions is unchanged — a
+  placement write touches the same RUH index in each partition it stripes
+  over.
+
+## Phase 5 — FDP events
+
+A 63-record ring of `struct nvme_fdp_event` lives in `fdp_ctx`, overwriting
+oldest-first and served most-recent-first through LID 0x23 (64-byte header +
+63 × 64-byte records = exactly one page).
+
+Emission points:
+- **Invalid Placement Identifier (0x3)** — a placement write whose DSPEC is
+  out of range fails with Invalid Field and queues this event with the
+  offending PID and the namespace ID.
+- **Implicitly Modified RU (0x81)** — `struct fdp_line` tracks which RUH each
+  line is open for (`-1` for GC/free lines); when GC selects a victim line
+  that the host wrote through an RUH, this event is queued with that PID
+  before relocation starts. Data moved by GC lands on RUH-less lines, so a
+  later reclaim of those does not re-trigger the event.
+- **RU Not Fully Written (0x0)** is advertised as supported but never fires:
+  this FTL only rotates a line once it is completely written, so the
+  condition cannot occur.
+
+All emissions honor the FID 0x1E enable mask, and all event types default to
+disabled per spec — `nvme fdp events` stays empty until the host enables
+event types via Set Features 0x1E. Timestamps are `local_clock()` nanoseconds
+rather than NVMe timestamp-feature time; fine for emulation, worth knowing
+when correlating with host clocks.
 
 ## Files
 
@@ -198,40 +244,107 @@ sudo nvme read /dev/nvme0n1 --start-block=0 --block-count=63 \
      --data-size=32768 --data=/tmp/y && cmp /tmp/x /tmp/y && echo "Phase 4 PASS"
 ```
 
-## Phase 4 — per-RUH placement writes
+### Phase 5 check — FDP events
 
-- `struct fdp_ftl` carries `wp_ruh[FDP_NR_RUH]` — one open line per RUH per
-  FTL partition — plus the GC write pointer. With `SSD_PARTITIONS = 4` and
-  8 RUHs that is 36 open lines device-wide; `gc_thres_lines` was raised to
-  `FDP_NR_RUH + 1` accordingly.
-- `fdp_write` parses DTYPE (CDW12 bits 23:20 = `control` bits 7:4) and DSPEC
-  (CDW13 bits 31:16 = `dsmgmt >> 16`). DTYPE = 2 (placement) routes the write
-  to `wp_ruh[dspec]` and marks that RUH host-specified in the usage log;
-  any other DTYPE routes to RUH 0 (marked controller-specified on first use).
-  Since RGIF = 0, DSPEC is the bare RUH index.
-- DSPEC ≥ `FDP_NR_RUH` fails the write with Invalid Field in Command, per
-  TP 4146a. (The corresponding FDP event is queued from Phase 5.)
-- GC is RUH-agnostic: victim lines come from the shared pool regardless of
-  which RUH originally filled them, and GC writes use the dedicated GC
-  write pointer. LPN striping across the 4 partitions is unchanged — a
-  placement write touches the same RUH index in each partition it stripes
-  over.
+```bash
+# Events default to disabled; enable invalid-PID reporting first
+sudo nvme fdp set-events /dev/nvme0n1 --enable --event-types=3
+
+# Trigger one: out-of-range placement ID
+sudo nvme write /dev/nvme0n1 --start-block=0 --block-count=63 \
+     --data-size=32768 --data=/tmp/x --dir-type=2 --dir-spec=99
+# write fails with INVALID_FIELD, and...
+
+sudo nvme fdp events /dev/nvme0 --endgrp-id=1
+# expect: 1 event, type 0x3 (Invalid Placement Identifier), pid=99
+
+# Implicitly-modified-RU events (type 0x81) appear once GC kicks in under
+# sustained overwrite load with --event-types=129 enabled as well.
+```
 
 ## Roadmap
 
-### Phase 5 — events & statistics
+### Phase 6 — integration testing
 
-- Emit "RU Not Modified" events on RU rotation.
-- Bump `host_bytes_written` on placement writes; `media_bytes_written` on GC
-  writes.
-- Honor the FID 0x1E event filter.
-- Exit: `nvme fdp events` accumulates entries under a stress workload.
+Everything up to Phase 5 is compile-tested only; Phase 6 is the runtime
+validation pass. Two environments, in order:
 
-### Phase 6 — integration
+#### Environment A — virtme-ng VM (start here)
 
-- `fio --ioengine=io_uring_cmd --cmd_type=nvme --dtype=2 --dspec=…` workloads.
-- Verify low WAF (host_bytes ≈ media_bytes) when lifetimes are separable
-  across PIDs, vs. high WAF when all writes collapse to one RUH.
+The setup from the Test section above. The VM boots the host's own kernel
+under QEMU/KVM with `$HOME` live-mounted, so the same checkout is built and
+loaded inside the guest. A panic in `nvmev.ko` kills only the guest —
+relaunch `vng` and go again. No grub changes, no reboots, no risk to the
+host.
+
+What it is good for:
+- All functional checks (Phase 1–5 recipes above): identify fields, log
+  pages, features, placement routing, invalid-PID rejection, events.
+- WAF comparison. Write amplification is a function of FTL logic and
+  workload shape, not wall-clock speed, so ΔMBMW/ΔHBMW ratios measured in
+  the VM are valid.
+
+What it is not good for:
+- Absolute latency/throughput numbers. NVMeVirt's timing emulation depends
+  on busy-polling threads pinned to isolated CPUs; inside a VM those are
+  vCPUs at the mercy of the host scheduler, so timing fidelity is reduced.
+  Functional results carry over; performance numbers do not.
+
+#### Environment B — bare metal (for performance-faithful runs)
+
+Only after the full Phase 6 suite passes in the VM. Requires host
+configuration (and survives reboots, so undo it when done):
+
+```bash
+# /etc/default/grub — reserve memory, isolate CPUs, sidestep the IOMMU panic
+GRUB_CMDLINE_LINUX="memmap=8G\\\$16G isolcpus=2,3 intremap=off"
+sudo update-grub && sudo reboot
+
+# after reboot — verify the reservation took
+cat /proc/iomem | grep -i reserved
+
+sudo insmod ./nvmev.ko memmap_start=16G memmap_size=8G cpus=2,3
+```
+
+Adjust offsets/sizes to this machine's RAM (62 GiB total). The known
+failure mode: a panic in `__pci_enable_msix()` / `nvme_hwmon_init()` at
+insmod means IOMMU interrupt remapping is still active — check that
+`intremap=off` is really on the running command line (`cat /proc/cmdline`).
+
+#### Workload plan
+
+fio ≥ 3.34 drives FDP natively through the io_uring passthru engine
+(`--fdp=1` handles the placement directives; no manual dtype/dspec):
+
+```bash
+# A: lifetime-separated streams — each job overwrites its own region at its
+# own rate, placed via distinct PIDs
+sudo fio --name=sep --ioengine=io_uring_cmd --cmd_type=nvme \
+     --filename=/dev/ng0n1 --rw=randwrite --bs=32k --iodepth=8 \
+     --fdp=1 --fdp_pli=1,2,3 --fdp_pli_select=roundrobin \
+     --size=100% --loops=4 --group_reporting
+
+# B: same load, everything collapsed onto the default RUH (no --fdp)
+sudo fio --name=mixed --ioengine=io_uring_cmd --cmd_type=nvme \
+     --filename=/dev/ng0n1 --rw=randwrite --bs=32k --iodepth=8 \
+     --size=100% --loops=4 --group_reporting
+```
+
+Measure WAF per run as ΔMBMW / ΔHBMW from `nvme fdp stats` snapshots taken
+before and after (reload the module between runs for clean counters — state
+is volatile). The namespace must be overwritten well past its capacity
+(`--loops` ≥ 2 with `--size=100%`) or GC never runs and both WAFs are 1.0.
+
+Pass criteria:
+- Run A WAF noticeably lower than run B WAF (separated lifetimes → lines
+  die wholesale → cheaper GC). The gap, not the absolute values, is the
+  result.
+- `nvme fdp usage` shows the PIDs used by run A as host-specified.
+- With event types 0x3/0x81 enabled, `nvme fdp events` accumulates
+  implicitly-modified-RU events during GC-heavy stretches.
+- The conv_ftl (`SAMSUNG_970PRO`) build under workload B's I/O pattern
+  yields a WAF comparable to the FDP build's run B — confirming the FDP
+  target didn't regress baseline GC behavior.
 
 ## References
 
