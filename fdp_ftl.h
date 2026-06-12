@@ -8,6 +8,10 @@
 #include "ssd_config.h"
 #include "ssd.h"
 
+/* The struct definitions are sized by FDP_NR_RUH, which only exists for the
+ * FDP target. Other targets just need the namespace entry points below. */
+#if (BASE_SSD == SAMSUNG_FDP)
+
 struct fdpparams {
 	uint32_t gc_thres_lines;
 	uint32_t gc_thres_lines_high;
@@ -58,11 +62,14 @@ struct fdp_ftl {
 	struct fdpparams cp;
 	struct ppa *maptbl;
 	uint64_t *rmap;
-	struct fdp_write_pointer wp;
+	/* one user write pointer per reclaim unit handle */
+	struct fdp_write_pointer wp_ruh[FDP_NR_RUH];
 	struct fdp_write_pointer gc_wp;
 	struct fdp_line_mgmt lm;
 	struct fdp_write_flow_control wfc;
 };
+
+#endif /* BASE_SSD == SAMSUNG_FDP */
 
 void fdp_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,
 			uint32_t cpu_nr_dispatcher);

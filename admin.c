@@ -240,6 +240,14 @@ static void __nvmev_admin_get_log_page(int eid)
 		__memcpy(page, &effects_log, len);
 		break;
 	}
+#if SUPPORTED_SSD_TYPE(FDP)
+	case NVME_LOG_FDP_CONFIGS:
+	case NVME_LOG_FDP_RUH_USAGE:
+	case NVME_LOG_FDP_STATS:
+	case NVME_LOG_FDP_EVENTS:
+		fdp_get_log_page(cmd->lid, page, len);
+		break;
+#endif
 	default:
 		/*
 		 * The NVMe protocol mandates several commands (lid) to be implemented, but some
@@ -321,6 +329,9 @@ static void __nvmev_admin_identify_namespace(int eid)
 	if (NS_SSD_TYPE(nsid) == SSD_TYPE_FDP) {
 		const uint16_t lbas_per_oneshot = ONESHOT_PAGE_SIZE >> LBA_BITS;
 
+		/* NPWG/NPWA/NOWS are only valid to the host when NSFEAT
+		 * bit 4 (I/O optimization fields) is set. */
+		ns->nsfeat |= NVME_NS_FEAT_IO_OPT;
 		ns->endgid = cpu_to_le16(NVMEV_FDP_ENDGID);
 		ns->npwg = cpu_to_le16(lbas_per_oneshot - 1);
 		ns->npwa = cpu_to_le16(lbas_per_oneshot - 1);
@@ -449,7 +460,8 @@ static void __nvmev_admin_identify_ctrl(int eid)
 	ctrl->cqes = 0x44;
 
 #if SUPPORTED_SSD_TYPE(FDP)
-	ctrl->ctratt = cpu_to_le32(NVME_CTRL_CTRATT_FDPS);
+	/* FDP operates on endurance groups; advertise both together. */
+	ctrl->ctratt |= cpu_to_le32(NVME_CTRL_CTRATT_ENDGRPS | NVME_CTRL_CTRATT_FDPS);
 #endif
 
 	__make_cq_entry(eid, NVME_SC_SUCCESS);
@@ -495,6 +507,7 @@ static void __nvmev_admin_set_features(int eid)
 	struct nvme_features *cmd = &sq_entry(eid).features;
 	__le32 result0 = 0;
 	__le32 result1 = 0;
+	u16 sc = NVME_SC_SUCCESS;
 
 	switch (cmd->fid) {
 	case NVME_FEAT_ARBITRATION:
@@ -527,11 +540,28 @@ static void __nvmev_admin_set_features(int eid)
 	case NVME_FEAT_HOST_ID:
 	case NVME_FEAT_RESV_MASK:
 	case NVME_FEAT_RESV_PERSIST:
+		break;
+#if SUPPORTED_SSD_TYPE(FDP)
+	case NVME_FEAT_FDP:
+		/* FDP is always on with configuration 0. Allow a no-op
+		 * re-enable; refuse disabling or another config index. */
+		if ((cmd->dword11 & 0x1) != 0x1 || ((cmd->dword11 >> 8) & 0xFF) != 0)
+			sc = NVME_SC_FEATURE_NOT_CHANGEABLE;
+		break;
+	case NVME_FEAT_FDP_EVENTS: {
+		uint32_t result;
+
+		fdp_set_feature_events(cmd->dword11,
+				       cmd->prp1 ? prp_address(cmd->prp1) : NULL, &result);
+		result0 = result;
+		break;
+	}
+#endif
 	default:
 		break;
 	}
 
-	__make_cq_entry_results(eid, NVME_SC_SUCCESS, result0, result1);
+	__make_cq_entry_results(eid, sc, result0, result1);
 }
 
 static void __nvmev_admin_get_features(int eid)
@@ -561,6 +591,20 @@ static void __nvmev_admin_get_features(int eid)
 	case NVME_FEAT_HOST_ID:
 	case NVME_FEAT_RESV_MASK:
 	case NVME_FEAT_RESV_PERSIST:
+		break;
+#if SUPPORTED_SSD_TYPE(FDP)
+	case NVME_FEAT_FDP:
+		result0 = 0x1; /* FDPE = 1 (enabled), FDPCI = 0 */
+		break;
+	case NVME_FEAT_FDP_EVENTS: {
+		uint32_t result;
+
+		fdp_get_feature_events(cmd->dword11,
+				       cmd->prp1 ? prp_address(cmd->prp1) : NULL, &result);
+		result0 = result;
+		break;
+	}
+#endif
 	default:
 		break;
 	}

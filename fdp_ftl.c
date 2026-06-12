@@ -6,6 +6,151 @@
 
 #include "nvmev.h"
 #include "fdp_ftl.h"
+#include "nvme_fdp.h"
+
+/*
+ * Endurance-group-scoped FDP state (single endurance group, single
+ * configuration). Both the admin path (log pages, features) and the I/O
+ * path (stats accounting) run on the dispatcher thread, so no locking.
+ */
+static struct {
+	uint64_t hbmw;	/* host bytes written (FDP statistics log) */
+	uint64_t mbmw;	/* media bytes written, incl. GC */
+	uint64_t mbe;	/* media bytes erased */
+	uint64_t runs;	/* reclaim unit nominal size in bytes */
+	uint8_t ruh_attr[FDP_NR_RUH];
+	struct {
+		uint8_t type;
+		bool enabled;
+	} events[2];
+} fdp_ctx = {
+	.events = {
+		{ .type = NVME_FDP_EVT_RU_NOT_FULLY_WRITTEN, .enabled = false },
+		{ .type = NVME_FDP_EVT_INVALID_PID, .enabled = false },
+	},
+};
+
+void fdp_init_ctx(uint64_t runs)
+{
+	fdp_ctx.hbmw = 0;
+	fdp_ctx.mbmw = 0;
+	fdp_ctx.mbe = 0;
+	fdp_ctx.runs = runs;
+	memset(fdp_ctx.ruh_attr, NVME_FDP_RUHA_UNUSED, sizeof(fdp_ctx.ruh_attr));
+}
+
+static void __fill_fdp_log_configs(uint8_t *log)
+{
+	struct nvme_fdp_config_log *hdr = (void *)log;
+	struct nvme_fdp_config_desc *desc = (void *)(log + sizeof(*hdr));
+	struct nvme_fdp_ruh_desc *ruhs = (void *)(log + sizeof(*hdr) + sizeof(*desc));
+	const uint16_t dsze = sizeof(*desc) + FDP_NR_RUH * sizeof(*ruhs);
+	int i;
+
+	hdr->n = cpu_to_le16(0); /* one configuration, 0-based */
+	hdr->version = 0;
+	hdr->size = cpu_to_le32(sizeof(*hdr) + dsze);
+
+	desc->dsze = cpu_to_le16(dsze);
+	desc->fdpa = NVME_FDP_CONFIG_FDPA_VALID; /* RGIF = 0: PID is the RUH index */
+	desc->vss = 0;
+	desc->nrg = cpu_to_le32(FDP_NR_RG);
+	desc->nruh = cpu_to_le16(FDP_NR_RUH);
+	desc->maxpids = cpu_to_le16(FDP_NR_RUH - 1);
+	desc->nns = cpu_to_le32(NR_NAMESPACES);
+	desc->runs = cpu_to_le64(fdp_ctx.runs);
+	desc->erutl = 0;
+
+	for (i = 0; i < FDP_NR_RUH; i++)
+		ruhs[i].ruht = NVME_FDP_RUHT_INITIALLY_ISOLATED;
+}
+
+static void __fill_fdp_log_ruh_usage(uint8_t *log)
+{
+	struct nvme_fdp_ruhu_log *hdr = (void *)log;
+	struct nvme_fdp_ruhu_desc *descs = (void *)(log + sizeof(*hdr));
+	int i;
+
+	hdr->nruh = cpu_to_le16(FDP_NR_RUH);
+	for (i = 0; i < FDP_NR_RUH; i++)
+		descs[i].ruha = fdp_ctx.ruh_attr[i];
+}
+
+static void __fill_fdp_log_stats(uint8_t *log)
+{
+	struct nvme_fdp_stats_log *stats = (void *)log;
+
+	/* 128-bit little-endian counters; we only ever fill the low 64 bits */
+	*(__le64 *)stats->hbmw = cpu_to_le64(fdp_ctx.hbmw);
+	*(__le64 *)stats->mbmw = cpu_to_le64(fdp_ctx.mbmw);
+	*(__le64 *)stats->mbe = cpu_to_le64(fdp_ctx.mbe);
+}
+
+void fdp_get_log_page(uint8_t lid, void *buf, uint32_t len)
+{
+	static uint8_t log[PAGE_SIZE];
+
+	memset(log, 0, sizeof(log));
+
+	switch (lid) {
+	case NVME_LOG_FDP_CONFIGS:
+		__fill_fdp_log_configs(log);
+		break;
+	case NVME_LOG_FDP_RUH_USAGE:
+		__fill_fdp_log_ruh_usage(log);
+		break;
+	case NVME_LOG_FDP_STATS:
+		__fill_fdp_log_stats(log);
+		break;
+	case NVME_LOG_FDP_EVENTS:
+		/* Header only until Phase 5 starts queueing events */
+		((struct nvme_fdp_events_log *)log)->n = cpu_to_le32(0);
+		break;
+	default:
+		NVMEV_ASSERT(0);
+	}
+
+	/* Single-PRP transfer, same constraint as the other log pages */
+	memcpy(buf, log, min_t(uint32_t, len, PAGE_SIZE));
+}
+
+void fdp_get_feature_events(uint32_t dw11, void *buf, uint32_t *result)
+{
+	struct nvme_fdp_supported_event_desc *desc = buf;
+	int i;
+
+	*result = ARRAY_SIZE(fdp_ctx.events);
+
+	if (!desc)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(fdp_ctx.events); i++) {
+		desc[i].evt = fdp_ctx.events[i].type;
+		desc[i].evta = fdp_ctx.events[i].enabled ? 0x1 : 0x0;
+	}
+}
+
+void fdp_set_feature_events(uint32_t dw11, void *buf, uint32_t *result)
+{
+	/* CDW11 bits 31:16 carry the number of event descriptors supplied */
+	uint32_t noet = (dw11 >> 16) & 0xFF;
+	struct nvme_fdp_supported_event_desc *desc = buf;
+	int i, j;
+
+	*result = 0;
+
+	if (!desc)
+		return;
+
+	for (i = 0; i < noet; i++) {
+		for (j = 0; j < ARRAY_SIZE(fdp_ctx.events); j++) {
+			if (fdp_ctx.events[j].type == desc[i].evt) {
+				fdp_ctx.events[j].enabled = desc[i].evta & 0x1;
+				(*result)++;
+			}
+		}
+	}
+}
 
 static inline bool last_pg_in_wordline(struct fdp_ftl *fdp_ftl, struct ppa *ppa)
 {
@@ -180,10 +325,11 @@ static struct fdp_line *get_next_free_line(struct fdp_ftl *fdp_ftl)
 	return curline;
 }
 
-static struct fdp_write_pointer *__get_wp(struct fdp_ftl *ftl, uint32_t io_type)
+static struct fdp_write_pointer *__get_wp(struct fdp_ftl *ftl, uint32_t io_type, uint32_t ruh)
 {
 	if (io_type == USER_IO) {
-		return &ftl->wp;
+		NVMEV_ASSERT(ruh < FDP_NR_RUH);
+		return &ftl->wp_ruh[ruh];
 	} else if (io_type == GC_IO) {
 		return &ftl->gc_wp;
 	}
@@ -192,9 +338,9 @@ static struct fdp_write_pointer *__get_wp(struct fdp_ftl *ftl, uint32_t io_type)
 	return NULL;
 }
 
-static void prepare_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type)
+static void prepare_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type, uint32_t ruh)
 {
-	struct fdp_write_pointer *wp = __get_wp(fdp_ftl, io_type);
+	struct fdp_write_pointer *wp = __get_wp(fdp_ftl, io_type, ruh);
 	struct fdp_line *curline = get_next_free_line(fdp_ftl);
 
 	NVMEV_ASSERT(wp);
@@ -210,11 +356,11 @@ static void prepare_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type)
 	};
 }
 
-static void advance_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type)
+static void advance_write_pointer(struct fdp_ftl *fdp_ftl, uint32_t io_type, uint32_t ruh)
 {
 	struct ssdparams *spp = &fdp_ftl->ssd->sp;
 	struct fdp_line_mgmt *lm = &fdp_ftl->lm;
-	struct fdp_write_pointer *wpp = __get_wp(fdp_ftl, io_type);
+	struct fdp_write_pointer *wpp = __get_wp(fdp_ftl, io_type, ruh);
 
 	NVMEV_DEBUG_VERBOSE("current wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n",
 			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg);
@@ -270,10 +416,10 @@ out:
 			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg, wpp->curline->id);
 }
 
-static struct ppa get_new_page(struct fdp_ftl *fdp_ftl, uint32_t io_type)
+static struct ppa get_new_page(struct fdp_ftl *fdp_ftl, uint32_t io_type, uint32_t ruh)
 {
 	struct ppa ppa;
-	struct fdp_write_pointer *wp = __get_wp(fdp_ftl, io_type);
+	struct fdp_write_pointer *wp = __get_wp(fdp_ftl, io_type, ruh);
 
 	ppa.ppa = 0;
 	ppa.g.ch = wp->ch;
@@ -329,8 +475,13 @@ static void fdp_init_ftl(struct fdp_ftl *fdp_ftl, struct fdpparams *cpp, struct 
 	init_rmap(fdp_ftl);
 	init_lines(fdp_ftl);
 
-	prepare_write_pointer(fdp_ftl, USER_IO);
-	prepare_write_pointer(fdp_ftl, GC_IO);
+	{
+		uint32_t ruh;
+
+		for (ruh = 0; ruh < FDP_NR_RUH; ruh++)
+			prepare_write_pointer(fdp_ftl, USER_IO, ruh);
+	}
+	prepare_write_pointer(fdp_ftl, GC_IO, 0);
 
 	init_write_flow_control(fdp_ftl);
 
@@ -350,8 +501,9 @@ static void fdp_remove_ftl(struct fdp_ftl *fdp_ftl)
 static void fdp_init_params(struct fdpparams *cpp)
 {
 	cpp->op_area_pcent = OP_AREA_PERCENT;
-	cpp->gc_thres_lines = 2;
-	cpp->gc_thres_lines_high = 2;
+	/* every RUH keeps an open line, plus one for GC */
+	cpp->gc_thres_lines = FDP_NR_RUH + 1;
+	cpp->gc_thres_lines_high = FDP_NR_RUH + 1;
 	cpp->enable_gc_delay = 1;
 	cpp->pba_pcent = (int)((1 + cpp->op_area_pcent) * 100);
 }
@@ -368,6 +520,9 @@ void fdp_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *m
 
 	ssd_init_params(&spp, size, nr_parts);
 	fdp_init_params(&cpp);
+
+	/* One reclaim unit = one line (superblock) of an FTL partition */
+	fdp_init_ctx((uint64_t)spp.pgs_per_line * spp.pgsz);
 
 	fdp_ftls = kmalloc(sizeof(struct fdp_ftl) * nr_parts, GFP_KERNEL);
 
@@ -537,6 +692,8 @@ static void mark_block_free(struct fdp_ftl *fdp_ftl, struct ppa *ppa)
 	blk->ipc = 0;
 	blk->vpc = 0;
 	blk->erase_cnt++;
+
+	fdp_ctx.mbe += (uint64_t)spp->pgs_per_blk * spp->pgsz;
 }
 
 static void gc_read_page(struct fdp_ftl *fdp_ftl, struct ppa *ppa)
@@ -564,13 +721,15 @@ static uint64_t gc_write_page(struct fdp_ftl *fdp_ftl, struct ppa *old_ppa)
 	uint64_t lpn = get_rmap_ent(fdp_ftl, old_ppa);
 
 	NVMEV_ASSERT(valid_lpn(fdp_ftl, lpn));
-	new_ppa = get_new_page(fdp_ftl, GC_IO);
+	new_ppa = get_new_page(fdp_ftl, GC_IO, 0);
 	set_maptbl_ent(fdp_ftl, lpn, &new_ppa);
 	set_rmap_ent(fdp_ftl, lpn, &new_ppa);
 
 	mark_page_valid(fdp_ftl, &new_ppa);
 
-	advance_write_pointer(fdp_ftl, GC_IO);
+	advance_write_pointer(fdp_ftl, GC_IO, 0);
+
+	fdp_ctx.mbmw += spp->pgsz; /* GC traffic counts as media-written only */
 
 	if (cpp->enable_gc_delay) {
 		struct nand_cmd gcw = {
@@ -869,6 +1028,10 @@ static bool fdp_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	uint64_t start_lpn = lba / spp->secs_per_pg;
 	uint64_t end_lpn = (lba + nr_lba - 1) / spp->secs_per_pg;
 
+	const uint16_t dtype = (cmd->rw.control >> NVME_RW_DTYPE_SHIFT) & NVME_RW_DTYPE_MASK;
+	const uint16_t dspec = cmd->rw.dsmgmt >> 16;
+	uint32_t ruh = 0;
+
 	uint64_t lpn;
 	uint32_t nr_parts = ns->nr_parts;
 
@@ -890,9 +1053,28 @@ static bool fdp_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 		return false;
 	}
 
+	/* Placement directive routing (TP 4146a). With RGIF = 0 the whole
+	 * DSPEC field is the reclaim unit handle index. */
+	if (dtype == NVME_DIRECTIVE_PLACEMENT) {
+		if (dspec >= FDP_NR_RUH) {
+			ret->status = NVME_SC_INVALID_FIELD;
+			ret->nsecs_target = req->nsecs_start;
+			return true;
+		}
+		ruh = dspec;
+		fdp_ctx.ruh_attr[ruh] = NVME_FDP_RUHA_HOST;
+	} else if (fdp_ctx.ruh_attr[0] == NVME_FDP_RUHA_UNUSED) {
+		/* non-placement writes implicitly use RUH 0 */
+		fdp_ctx.ruh_attr[0] = NVME_FDP_RUHA_CTRL;
+	}
+
 	allocated_buf_size = buffer_allocate(wbuf, LBA_TO_BYTE(nr_lba));
 	if (allocated_buf_size < LBA_TO_BYTE(nr_lba))
 		return false;
+
+	/* FDP statistics: host write traffic also reaches the media */
+	fdp_ctx.hbmw += LBA_TO_BYTE(nr_lba);
+	fdp_ctx.mbmw += LBA_TO_BYTE(nr_lba);
 
 	nsecs_latest =
 		ssd_advance_write_buffer(fdp_ftl->ssd, req->nsecs_start, LBA_TO_BYTE(nr_lba));
@@ -914,14 +1096,14 @@ static bool fdp_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 			NVMEV_DEBUG("%s: %lld is invalid, ", __func__, ppa2pgidx(fdp_ftl, &ppa));
 		}
 
-		ppa = get_new_page(fdp_ftl, USER_IO);
+		ppa = get_new_page(fdp_ftl, USER_IO, ruh);
 		set_maptbl_ent(fdp_ftl, local_lpn, &ppa);
 		NVMEV_DEBUG("%s: got new ppa %lld, ", __func__, ppa2pgidx(fdp_ftl, &ppa));
 		set_rmap_ent(fdp_ftl, local_lpn, &ppa);
 
 		mark_page_valid(fdp_ftl, &ppa);
 
-		advance_write_pointer(fdp_ftl, USER_IO);
+		advance_write_pointer(fdp_ftl, USER_IO, ruh);
 
 		if (last_pg_in_wordline(fdp_ftl, &ppa)) {
 			swr.ppa = &ppa;

@@ -9,15 +9,15 @@ the existing conventional-SSD path (`conv_ftl`).
 |-------|-----------------------------------------------------------|-------|
 | 1     | Build scaffold and FDP FTL backend (clone of `conv_ftl`)  | done  |
 | 2     | FDP capability advertisement in Identify                  | done  |
-| 3     | FDP log pages (configs, RUH usage, stats, events) + features | not started |
-| 4     | Per-RUH placement: writes routed by DTYPE=Placement + DSPEC | not started |
-| 5     | RU rotation events + statistics lifecycle                 | not started |
+| 3     | FDP log pages (configs, RUH usage, stats, events) + features | done |
+| 4     | Per-RUH placement: writes routed by DTYPE=Placement + DSPEC | done |
+| 5     | RU rotation events + statistics lifecycle                 | partial (stats counters live) |
 | 6     | Integration tests + workload comparison vs. conv_ftl       | not started |
 
-After phases 1 + 2, the device builds, loads, services normal block I/O, and
-advertises FDP support — but does not yet make any placement decision based on
-host directives. All writes flow through a single shared write pointer, same as
-`conv_ftl`. The advertisement is purely informational at this stage.
+After phases 1–4 the device is a functional FDP SSD: placement-directive
+writes land in per-RUH reclaim units, non-directive writes use RUH 0, invalid
+placement IDs are rejected, and the logs/features report live state. What
+remains is the event ring (Phase 5) and workload validation (Phase 6).
 
 ## Phase 1 — build scaffold
 
@@ -45,9 +45,11 @@ at runtime.
 
 ## Phase 2 — Identify advertisement
 
-- `nvme_fdp.h` (new) defines `NVME_CTRL_CTRATT_FDPS = 1 << 19` (the
-  Flexible Data Placement Supported bit in the controller's CTRATT field) and
-  `NVMEV_FDP_ENDGID = 1` (single endurance group).
+- `nvme_fdp.h` (new) defines `NVME_CTRL_CTRATT_FDPS = 1 << 19` (Flexible Data
+  Placement Supported), `NVME_CTRL_CTRATT_ENDGRPS = 1 << 4` (Endurance Groups
+  supported — FDP operates on endurance groups, so both are advertised
+  together), `NVME_NS_FEAT_IO_OPT = 1 << 4` (NSFEAT bit gating the NPWG/NPWA/
+  NOWS fields), and `NVMEV_FDP_ENDGID = 1` (single endurance group).
 - `nvme.h`: the legacy `rsvd64[40]` gap in `struct nvme_id_ns` is sliced into
   the NVMe 2.0 fields it actually represents: `npwg`, `npwa`, `npdg`, `npda`,
   `nows`, `mssrl`, `mcl`, `msrc`, `anagrpid`, `nsattr`, `nvmsetid`, `endgid`.
@@ -55,11 +57,40 @@ at runtime.
   targets (NVM / CONV / ZNS / KV) keep zero-filling those bytes and see no
   behavior change.
 - `admin.c`:
-  - Identify Controller (CNS 0x01): sets `ctrl->ctratt = FDPS` under
+  - Identify Controller (CNS 0x01): sets `ctratt |= ENDGRPS | FDPS` under
     `#if SUPPORTED_SSD_TYPE(FDP)`.
   - Identify Namespace (CNS 0x00): for `SSD_TYPE_FDP` namespaces, sets
-    `endgid = 1` and `npwg = npwa = nows = (ONESHOT_PAGE_SIZE/LBA_SIZE) - 1`
+    `nsfeat` bit 4 (required for hosts to honor the I/O-optimization fields),
+    `endgid = 1`, and `npwg = npwa = nows = (ONESHOT_PAGE_SIZE/LBA_SIZE) - 1`
     (= 63 LBAs, i.e. 32 KiB preferred write granularity).
+
+## Phase 3 — log pages + features
+
+All endurance-group state lives in a private singleton `fdp_ctx` in
+`fdp_ftl.c` (admin and I/O paths both run on the dispatcher thread, so it is
+lock-free by construction). Wire-format structs are in `nvme_fdp.h`; admin.c
+dispatches into `fdp_get_log_page` / `fdp_{get,set}_feature_events` under
+`#if SUPPORTED_SSD_TYPE(FDP)`.
+
+- LID 0x20 FDP Configurations: one configuration — `nrg`, `nruh`, `maxpids`,
+  `runs` (= one FTL line: `pgs_per_line * pgsz`), RUHs typed Initially
+  Isolated, FDPA valid bit + RGIF=0 (placement ID is the RUH index).
+- LID 0x21 RUH Usage: per-RUH attribute byte (all "unused" until Phase 4
+  starts marking them host-specified).
+- LID 0x22 FDP Statistics: HBMW / MBMW / MBE 128-bit counters, already fed
+  by live hooks — host writes bump HBMW+MBMW in `fdp_write`, GC page copies
+  bump MBMW in `gc_write_page`, block erases bump MBE in `mark_block_free`.
+  `WAF ≈ MBMW / HBMW` is observable under workload now.
+- LID 0x23 FDP Events: header only, zero events (ring arrives with Phase 5).
+- FID 0x1D (FDP): Get returns FDPE=1/FDPCI=0; Set allows an idempotent
+  re-enable and otherwise fails with Feature Not Changeable.
+- FID 0x1E (FDP Events): Get/Set exchange `{evt, evta}` descriptors for the
+  two supported host event types (RU Not Fully Written, Invalid PID).
+
+Caveats: log transfers are single-PRP (≤ 4 KiB), matching the existing
+NVMeVirt log-page limitation; the FID 0x1E descriptor format is best-effort
+from TP 4146a and should be validated against `nvme fdp set-events` /
+`nvme fdp feature` output during testing.
 
 ## Files
 
@@ -127,33 +158,66 @@ cmp /tmp/x /tmp/y && echo "Phase 1 PASS"
 
 ```bash
 sudo nvme id-ctrl /dev/nvme0 -H | grep -iE 'ctratt|fdp|flex'
-# expect: ctratt : 0x80000  (bit 19 = Flexible Data Placement Supported)
+# expect: ctratt : 0x80010  (bit 19 = FDP Supported, bit 4 = Endurance Groups)
 
 sudo nvme id-ns /dev/nvme0n1 -H | grep -iE 'endgid|npwg|npwa|nows'
 # expect: endgid=1, npwg=63, npwa=63, nows=63
 ```
 
+### Phase 3 check — FDP logs and features
+
+```bash
+sudo nvme fdp configs /dev/nvme0 --endgrp-id=1
+# expect: 1 config: nrg=1, nruh=8, runs=512MiB (pgs_per_line * 4K), 8 RUHs type 1
+
+sudo nvme fdp usage  /dev/nvme0 --endgrp-id=1   # 8 RUHs, all "unused" for now
+sudo nvme fdp stats  /dev/nvme0 --endgrp-id=1   # HBMW/MBMW grow with dd traffic
+sudo nvme fdp events /dev/nvme0 --endgrp-id=1   # 0 events (Phase 5)
+
+sudo nvme get-feature /dev/nvme0 -f 0x1d        # expect value 0x1 (FDP enabled)
+```
+
+### Phase 4 check — placement writes routed per RUH
+
+```bash
+# Write 32 KiB with placement ID 3 (dtype 2, dspec 3)
+sudo dd if=/dev/urandom of=/tmp/x bs=32K count=1
+sudo nvme write /dev/nvme0n1 --start-block=0 --block-count=63 \
+     --data-size=32768 --data=/tmp/x --dir-type=2 --dir-spec=3
+
+# RUH 3 flips from "unused" to "host specified"; RUH 0 stays untouched
+sudo nvme fdp usage /dev/nvme0 --endgrp-id=1
+
+# Out-of-range placement ID is rejected with Invalid Field
+sudo nvme write /dev/nvme0n1 --start-block=0 --block-count=63 \
+     --data-size=32768 --data=/tmp/x --dir-type=2 --dir-spec=99
+# expect: NVMe status: INVALID_FIELD
+
+# Read-back still works regardless of which RUH the data went to
+sudo nvme read /dev/nvme0n1 --start-block=0 --block-count=63 \
+     --data-size=32768 --data=/tmp/y && cmp /tmp/x /tmp/y && echo "Phase 4 PASS"
+```
+
+## Phase 4 — per-RUH placement writes
+
+- `struct fdp_ftl` carries `wp_ruh[FDP_NR_RUH]` — one open line per RUH per
+  FTL partition — plus the GC write pointer. With `SSD_PARTITIONS = 4` and
+  8 RUHs that is 36 open lines device-wide; `gc_thres_lines` was raised to
+  `FDP_NR_RUH + 1` accordingly.
+- `fdp_write` parses DTYPE (CDW12 bits 23:20 = `control` bits 7:4) and DSPEC
+  (CDW13 bits 31:16 = `dsmgmt >> 16`). DTYPE = 2 (placement) routes the write
+  to `wp_ruh[dspec]` and marks that RUH host-specified in the usage log;
+  any other DTYPE routes to RUH 0 (marked controller-specified on first use).
+  Since RGIF = 0, DSPEC is the bare RUH index.
+- DSPEC ≥ `FDP_NR_RUH` fails the write with Invalid Field in Command, per
+  TP 4146a. (The corresponding FDP event is queued from Phase 5.)
+- GC is RUH-agnostic: victim lines come from the shared pool regardless of
+  which RUH originally filled them, and GC writes use the dedicated GC
+  write pointer. LPN striping across the 4 partitions is unchanged — a
+  placement write touches the same RUH index in each partition it stripes
+  over.
+
 ## Roadmap
-
-### Phase 3 — log pages + features (read-only state)
-
-- LID 0x20 FDP Configurations: enumerate (NR_RG, NR_RUH, RU_SIZE).
-- LID 0x21 RUH Usage: per-RUH `lba_written / lba_total`.
-- LID 0x22 FDP Statistics: `host_bytes_written`, `media_bytes_written`.
-- LID 0x23 FDP Events: ring of `struct fdp_event` (empty initially).
-- FID 0x1D FDP enable (per endurance group), FID 0x1E events bitmap.
-- Exit: `nvme fdp configs/stats/usage/events /dev/nvme0` return sensible
-  output.
-
-### Phase 4 — per-RUH placement writes
-
-- Replace single `wp` with `wp_ruh[NR_RG][NR_RUH]` in `struct fdp_ftl`.
-- Parse DTYPE (CDW12 bits 23:20) and DSPEC (CDW13 bits 31:16) in
-  `fdp_proc_nvme_io_cmd`. Route placement writes to the addressed RUH; route
-  non-placement writes to the spec-default RUH (RUH 0).
-- GC unchanged — still draws victim lines from a shared pool.
-- Exit: writes with `nvme write --dtype=2 --dspec=N` land in different lines
-  for different N's; verifiable via the existing `/proc/nvmev/io_units`.
 
 ### Phase 5 — events & statistics
 
