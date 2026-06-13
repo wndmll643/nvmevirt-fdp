@@ -1,156 +1,326 @@
-# NVMeVirt
+# NVMeVirt-FDP — Flexible Data Placement for NVMeVirt
 
-## Introduction
+> **This is a fork of [NVMeVirt](https://github.com/snu-csl/nvmevirt)** (SNU-CSL),
+> a software-defined virtual NVMe device implemented as a Linux kernel module.
+> It adds support for **Flexible Data Placement (FDP, NVMe TP 4146a)** on top of
+> the upstream conventional-SSD path (`conv_ftl`). The original NVMeVirt design,
+> build system, and non-FDP device targets (NVM / conventional SSD / ZNS / KV)
+> are unchanged; see the upstream repository and the FAST '23 paper for the base
+> emulator. This document covers only the FDP additions.
 
-NVMeVirt is a versatile software-defined virtual NVMe device. It is implemented as a Linux kernel module providing the system with a virtual NVMe device of various kinds. Currently, NVMeVirt supports conventional SSDs, NVM SSDs, ZNS SSDs, etc. The device is emulated at the PCI layer, presenting a native NVMe device to the entire system. Thus, NVMeVirt has the capability not only to function as a standard storage device, but also to be utilized in advanced storage configurations, such as NVMe-oF target offloading, kernel bypassing, and PCI peer-to-peer communication.
+FDP lets the host hint *where* data should be placed (by lifetime/stream) via
+per-write placement directives, so a flash device can co-locate data with
+similar lifetimes in the same reclaim units and lower garbage-collection write
+amplification. This fork emulates such a device.
 
-Further details on the design and implementation of NVMeVirt can be found in the following papers.
-- [NVMeVirt: A Versatile Software-defined Virtual NVMe Device (FAST 2023)](https://www.usenix.org/conference/fast23/presentation/kim-sang-hoon)
-- [Empowering Storage Systems Research with NVMeVirt: A Comprehensive NVMe Device Emulator (Transactions on Storage 2023)](https://dl.acm.org/doi/full/10.1145/3625006)
+## Status
 
-Please feel free to contact us at [nvmevirt@gmail.com](mailto:nvmevirt@gmail.com) if you have any questions or suggestions. Also you can raise an issue anytime for bug reports or discussions.
+| Phase | What it adds                                              | State |
+|-------|-----------------------------------------------------------|-------|
+| 1     | Build scaffold and FDP FTL backend (clone of `conv_ftl`)  | done  |
+| 2     | FDP capability advertisement in Identify                  | done  |
+| 3     | FDP log pages (configs, RUH usage, stats, events) + features | done |
+| 4     | Per-RUH placement: writes routed by DTYPE=Placement + DSPEC | done |
+| 5     | FDP event ring + statistics lifecycle                     | done |
+| 6     | Integration tests + WAF evaluation                        | done (VM): 47% WAF reduction; sweeps/bare-metal pending |
 
-We encourage you to cite our paper at FAST 2023 as follows:
+After phases 1–5 the device is a functional FDP SSD: placement-directive
+writes land in per-RUH reclaim units, non-directive writes use RUH 0, invalid
+placement IDs are rejected (and logged as FDP events), GC reclaims emit
+implicitly-modified-RU events, and the logs/features report live state.
+
+### Validation status
+
+Functional path validated end-to-end in a virtme-ng VM (TCG, host kernel
+6.12.77, nvme-cli 2.8) via `run_vm_test.sh`:
+- Phase 1: 256 KiB write/read round-trip matches.
+- Phase 2: `CTRATT=0x80010` (FDPS + ENDGRPS), `nsfeat` bit 4, `npwg=npwa=nows=63`,
+  `endgid=1`.
+- Phase 3: all four logs + features return correct data; HBMW/MBMW counters
+  track host writes live.
+- Phase 4: `--dir-type=2 --dir-spec=N` marks RUH N host-specified; non-placement
+  writes mark RUH 0 controller-specified; `dspec=99` rejected with Invalid Field.
+- Phase 5: invalid-PID (type 0x3) event captured with correct PID and NSID.
+
+Phase 6 evaluation (below) then drove the device into steady-state GC and
+confirmed the remaining paths: the `gc_write_page` MBMW bump and `mark_block_free`
+MBE bump are exercised (WAF rises to ~6× under churn), and FDP placement cuts
+WAF by ~47% vs. the baseline. The type-0x81 event count reads reliably only
+intermittently under TCG (see Phase 6 "Further work").
+
+Known cosmetic/semantic items:
+- RU Nominal Size is reported as one FTL partition's line size; the
+  host-visible reclaim unit striped across `SSD_PARTITIONS` is arguably 4x that.
+- Event timestamps use `local_clock()` (ns since boot), so `nvme fdp events`
+  shows a nonsensical wall-clock date. Cosmetic.
+
+VM gotchas worth remembering (encoded in `run_vm_test.sh`):
+- Reserve memory ABOVE 4 GiB; [3,4) GiB is the PCI MMIO hole, not DRAM, and
+  reserving it leaves the BAR unbacked → controller never becomes ready.
+- `vng` runs qemu via `shell=True`, so `memmap=1G$4G` needs the `$` backslash-
+  escaped to survive that extra shell.
+- Use `--disable-kvm`; KVM is only needed for realistic timing (bare metal).
+
+## Phase 1 — build scaffold
+
+- New build target `CONFIG_NVMEVIRT_FDP := y` in `Kbuild`, gated by
+  `-DBASE_SSD=SAMSUNG_FDP`.
+- New SSD model `SAMSUNG_FDP` (= 5) and namespace type `SSD_TYPE_FDP` (= 4) in
+  `ssd_config.h`. The geometry block mirrors `SAMSUNG_970PRO` (8 channels,
+  2 LUNs/ch, 32 KiB flash page) and adds three FDP knobs:
+  - `FDP_NR_RG = 1`     — reclaim groups
+  - `FDP_NR_RUH = 8`    — reclaim unit handles per namespace
+  - `FDP_NR_EVENTS = 63`— events log ring depth
+- `fdp_ftl.{c,h}` — forked from `conv_ftl.{c,h}` with `fdp_`-prefixed structs
+  and functions. Forked rather than refactored because phase 4 diverges
+  significantly (per-RUH write pointers) and the original `conv_ftl` should
+  stay stable.
+- `main.c` and `nvmev.h` wire dispatch branches for `SSD_TYPE_FDP` in
+  `NVMEV_NAMESPACE_INIT` / `_FINAL` and add a label in `__print_base_config`.
+
+The struct-name prefixing (`struct fdp_line`, `struct fdp_write_pointer`,
+`struct fdp_line_mgmt`, `struct fdp_write_flow_control`, `struct fdp_ftl`,
+`struct fdpparams`) is needed because `main.c` includes both `conv_ftl.h` and
+`fdp_ftl.h` — they coexist at compile time even though only one FTL is active
+at runtime.
+
+## Phase 2 — Identify advertisement
+
+- `nvme_fdp.h` (new) defines `NVME_CTRL_CTRATT_FDPS = 1 << 19` (Flexible Data
+  Placement Supported), `NVME_CTRL_CTRATT_ENDGRPS = 1 << 4` (Endurance Groups
+  supported — FDP operates on endurance groups, so both are advertised
+  together), `NVME_NS_FEAT_IO_OPT = 1 << 4` (NSFEAT bit gating the NPWG/NPWA/
+  NOWS fields), and `NVMEV_FDP_ENDGID = 1` (single endurance group).
+- `nvme.h`: the legacy `rsvd64[40]` gap in `struct nvme_id_ns` is sliced into
+  the NVMe 2.0 fields it actually represents: `npwg`, `npwa`, `npdg`, `npda`,
+  `nows`, `mssrl`, `mcl`, `msrc`, `anagrpid`, `nsattr`, `nvmsetid`, `endgid`.
+  Byte layout and total struct size unchanged — additive only, so non-FDP
+  targets (NVM / CONV / ZNS / KV) keep zero-filling those bytes and see no
+  behavior change.
+- `admin.c`:
+  - Identify Controller (CNS 0x01): sets `ctratt |= ENDGRPS | FDPS` under
+    `#if SUPPORTED_SSD_TYPE(FDP)`.
+  - Identify Namespace (CNS 0x00): for `SSD_TYPE_FDP` namespaces, sets
+    `nsfeat` bit 4 (required for hosts to honor the I/O-optimization fields),
+    `endgid = 1`, and `npwg = npwa = nows = (ONESHOT_PAGE_SIZE/LBA_SIZE) - 1`
+    (= 63 LBAs, i.e. 32 KiB preferred write granularity).
+
+## Phase 3 — log pages + features
+
+All endurance-group state lives in a private singleton `fdp_ctx` in
+`fdp_ftl.c` (admin and I/O paths both run on the dispatcher thread, so it is
+lock-free by construction). Wire-format structs are in `nvme_fdp.h`; admin.c
+dispatches into `fdp_get_log_page` / `fdp_{get,set}_feature_events` under
+`#if SUPPORTED_SSD_TYPE(FDP)`.
+
+- LID 0x20 FDP Configurations: one configuration — `nrg`, `nruh`, `maxpids`,
+  `runs` (= one FTL line: `pgs_per_line * pgsz`), RUHs typed Initially
+  Isolated, FDPA valid bit + RGIF=0 (placement ID is the RUH index).
+- LID 0x21 RUH Usage: per-RUH attribute byte (all "unused" until Phase 4
+  starts marking them host-specified).
+- LID 0x22 FDP Statistics: HBMW / MBMW / MBE 128-bit counters, fed by live
+  hooks — host writes bump HBMW+MBMW in `fdp_write`, GC page copies bump MBMW
+  in `gc_write_page`, block erases bump MBE in `mark_block_free`.
+  `WAF ≈ MBMW / HBMW` is observable under workload.
+- LID 0x23 FDP Events: served from the Phase 5 ring.
+- FID 0x1D (FDP): Get returns FDPE=1/FDPCI=0; Set allows an idempotent
+  re-enable and otherwise fails with Feature Not Changeable.
+- FID 0x1E (FDP Events): Get/Set exchange `{evt, evta}` descriptors for the
+  supported host event types.
+
+Caveat: log transfers are single-PRP (≤ 4 KiB), matching the existing
+NVMeVirt log-page limitation; our logs all fit in one page.
+
+## Phase 4 — per-RUH placement writes
+
+- `struct fdp_ftl` carries `wp_ruh[FDP_NR_RUH]` — one open line per RUH per
+  FTL partition — plus the GC write pointer. With `SSD_PARTITIONS = 4` and
+  8 RUHs that is 36 open lines device-wide; `gc_thres_lines` was raised to
+  `FDP_NR_RUH + 1` accordingly.
+- `fdp_write` parses DTYPE (CDW12 bits 23:20 = `control` bits 7:4) and DSPEC
+  (CDW13 bits 31:16 = `dsmgmt >> 16`). DTYPE = 2 (placement) routes the write
+  to `wp_ruh[dspec]` and marks that RUH host-specified in the usage log;
+  any other DTYPE routes to RUH 0 (marked controller-specified on first use).
+  Since RGIF = 0, DSPEC is the bare RUH index.
+- DSPEC ≥ `FDP_NR_RUH` fails the write with Invalid Field in Command, per
+  TP 4146a, and queues an Invalid-PID event (Phase 5).
+- GC is RUH-agnostic: victim lines come from the shared pool regardless of
+  which RUH originally filled them, and GC writes use the dedicated GC
+  write pointer. LPN striping across the 4 partitions is unchanged — a
+  placement write touches the same RUH index in each partition it stripes
+  over.
+
+## Phase 5 — FDP events
+
+A 63-record ring of `struct nvme_fdp_event` lives in `fdp_ctx`, overwriting
+oldest-first and served most-recent-first through LID 0x23 (64-byte header +
+63 × 64-byte records = exactly one page).
+
+Emission points:
+- **Invalid Placement Identifier (0x3)** — a placement write whose DSPEC is
+  out of range fails with Invalid Field and queues this event with the
+  offending PID and the namespace ID.
+- **Implicitly Modified RU (0x81)** — `struct fdp_line` tracks which RUH each
+  line is open for (`-1` for GC/free lines); when GC selects a victim line
+  that the host wrote through an RUH, this event is queued with that PID
+  before relocation starts. Data moved by GC lands on RUH-less lines, so a
+  later reclaim of those does not re-trigger the event.
+- **RU Not Fully Written (0x0)** is advertised as supported but never fires:
+  this FTL only rotates a line once it is completely written.
+
+All emissions honor the FID 0x1E enable mask, and all event types default to
+disabled per spec — `nvme fdp events` stays empty until the host enables
+event types via Set Features 0x1E. Timestamps are `local_clock()` nanoseconds.
+
+## Files
+
 ```
-@InProceedings{NVMeVirt:FAST23,
-  author = {Sang-Hoon Kim and Jaehoon Shim and Euidong Lee and Seongyeop Jeong and Ilkueon Kang and Jin-Soo Kim},
-  title = {{NVMeVirt}: A Versatile Software-defined Virtual {NVMe} Device},
-  booktitle = {Proceedings of the 21st USENIX Conference on File and Storage Technologies (USENIX FAST)},
-  address = {Santa Clara, CA},
-  month = {February},
-  year = {2023},
-}
+modified from upstream:
+  Kbuild           # +CONFIG_NVMEVIRT_FDP target
+  admin.c          # +FDPS in id-ctrl, +FDP fields in id-ns, +FDP logs/features
+  main.c           # +fdp_init/remove_namespace dispatch
+  nvme.h           # rsvd64[40] sliced into NVMe 2.0 fields
+  nvmev.h          # (local edits)
+  ssd_config.h     # +SAMSUNG_FDP model, +SSD_TYPE_FDP, +FDP knobs
+
+added:
+  fdp_ftl.c        # FDP FTL backend (fork of conv_ftl) + fdp_ctx, logs, events
+  fdp_ftl.h        # types & API
+  nvme_fdp.h       # FDP-specific NVMe constants and wire-format structs
+  run_vm_test.sh   # host launcher: build + boot virtme-ng VM + functional test
+  fdp_vm_test.sh   # in-guest functional test (phases 1-5)
+  run_eval.sh      # host launcher for the WAF evaluation
+  fdp_eval.sh      # in-guest evaluation: baseline vs FDP, computes WAF
+  fdp_workload.c   # synthetic hot/cold workload generator (NVMe passthrough)
+  README.md        # this file
 ```
 
+## Build
 
-## Installation
-
-### Linux kernel requirement
-
-The recommended Linux kernel version is v5.15.x and higher (tested on Linux vanilla kernel v5.15.37 and Ubuntu kernel v5.15.0-58-generic).
-
-### Reserving physical memory
-
-A part of the main memory should be reserved for the storage of the emulated NVMe device. To reserve a chunk of physical memory, add the following option to `GRUB_CMDLINE_LINUX` in `/etc/default/grub` as follows:
+The `Kbuild` ships with `CONFIG_NVMEVIRT_FDP := y` active. Just:
 
 ```bash
-GRUB_CMDLINE_LINUX="memmap=64G\\\$128G"
+make clean && make
 ```
 
-This example will reserve 64GiB of physical memory chunk (out of the total 192GiB physical memory) starting from the 128GiB memory offset. You may need to adjust those values depending on the available physical memory size and the desired storage capacity.
+Produces `nvmev.ko` linking `fdp_ftl.o`, `ssd.o`, `pqueue/pqueue.o`,
+`channel_model.o`.
 
-After changing the `/etc/default/grub` file, you are required to run the following commands to update `grub` and reboot your system.
+## Test
+
+Recommended: a virtme-ng VM, so a misbehaving build can only crash the guest.
+One-time host setup:
 
 ```bash
-$ sudo update-grub
-$ sudo reboot
+sudo apt install virtme-ng qemu-system-x86 nvme-cli
+sudo chmod a+r /boot/vmlinuz-$(uname -r)
 ```
 
-### Compiling `nvmevirt`
-
-Please download the latest version of `nvmevirt` from Github:
+Then run the full functional suite (builds on the host, boots a VM under TCG,
+runs phases 1–5 in the guest, captures output to `/tmp/fdp_vm.log`):
 
 ```bash
-$ git clone https://github.com/snu-csl/nvmevirt
+./run_vm_test.sh
 ```
 
-`nvmevirt` is implemented as a Linux kernel module. Thus, the kernel headers should be installed in the `/lib/modules/$(shell uname -r)` directory to compile `nvmevirt`.
+`fdp_vm_test.sh` is the in-guest script; it loads `nvme`, insmods the module
+with a memmap above 4 GiB, then walks each phase. Expected results are recorded
+under "Validation status" above. The individual `nvme` commands per phase
+(id-ctrl, id-ns, `nvme fdp configs/usage/stats/events`, `nvme write
+--dir-type/--dir-spec`, `nvme fdp set-events`) are spelled out in that script.
 
-Currently, you need to select the target device type by manually editing the `Kbuild`. You may find the following lines in the `Kbuild`, which imply that NVMeVirt is currently configured for emulating NVM(Non-Volatile Memory) SSD (such as Intel Optane SSD). You may uncomment other one to change the target device type. Note that you can select one device type at a time.
+## Phase 6 — evaluation (WAF)
 
-```Makefile
-# Select one of the targets to build
-CONFIG_NVMEVIRT_NVM := y
-#CONFIG_NVMEVIRT_SSD := y
-#CONFIG_NVMEVIRT_ZNS := y
-#CONFIG_NVMEVIRT_KV := y
-```
+The quantitative result for an FDP device is the **Write Amplification Factor**,
+`WAF = MBMW / HBMW`, read straight from the FDP Statistics log. The evaluation
+compares a lifetime-separated placement workload against a baseline that mixes
+all data in one reclaim unit, under sustained writes that drive the device into
+steady-state garbage collection:
 
-You may find the detailed configuration parameters for conventional SSD and ZNS SSD from `ssd_config.h`.
+- **Baseline:** hot and cold data written without placement directives (all to
+  RUH 0) — GC repeatedly copies surviving cold pages out of hot-dominated units.
+- **FDP:** hot data → one RUH, cold data → another — units fill with
+  same-lifetime data and are reclaimed wholesale, so GC copies less.
 
-Build the kernel module by running the `make` command in the `nvmevirt` source directory.
-```bash
-$ make
-make -C /lib/modules/5.15.37/build M=/path/to/nvmev modules
-make[1]: Entering directory '/path/to/linux-5.15.37'
-  CC [M]  /path/to/nvmev/main.o
-  CC [M]  /path/to/nvmev/pci.o
-  CC [M]  /path/to/nvmev/admin.o
-  CC [M]  /path/to/nvmev/io.o
-  CC [M]  /path/to/nvmev/dma.o
-  CC [M]  /path/to/nvmev/simple_ftl.o
-  LD [M]  /path/to/nvmev/nvmev.o
-  MODPOST /path/to/nvmev/Module.symvers
-  CC [M]  /path/to/nvmev/nvmev.mod.o
-  LD [M]  /path/to/nvmev/nvmev.ko
-  BTF [M] /path/to/nvmev/nvmev.ko
-make[1]: Leaving directory '/path/to/linux-5.15.37'
-$
-```
+### Methodology
 
-### Using `nvmevirt`
+Each trial loads the module fresh (FDP stats reset on init) and runs two phases:
 
-`nvmevirt` is configured to emulate the NVM SSD by default. You can attach an emulated NVM SSD in your system by loading the `nvmevirt` kernel module as follows:
+1. **Random-order fill** of the whole device. Random order is essential: with
+   no placement (baseline) it scatters hot and cold LBAs into the *same* erase
+   lines, so lifetimes are mixed; with placement (FDP) the fill already routes
+   hot→RUH 1 and cold→RUH 2, so lines are lifetime-pure.
+2. **Churn** — rewrite the hot set repeatedly (default: 90% of writes into the
+   20% hottest LBA space). In the baseline, invalidating scattered hot pages
+   forces GC to copy the cold survivors stuck in those lines; under FDP, hot
+   lines invalidate wholesale and are reclaimed without copying.
 
-```bash
-$ sudo insmod ./nvmev.ko \
-  memmap_start=128G \       # e.g., 1M, 4G, 8T
-  memmap_size=64G   \       # e.g., 1M, 4G, 8T
-  cpus=7,8                  # List of CPU cores to process I/O requests (should have at least 2)
-```
+`WAF = ΔMBMW / ΔHBMW` is measured as a **delta over the churn phase only** (FDP
+stats snapshotted after the fill), so the WAF≈1 fill does not dilute the
+steady-state number. Secondary metric: media bytes erased (MBE).
 
-In the above example, `memmap_start` and `memmap_size` indicate the relative offset and the size of the reserved memory, respectively. Those values should match the configurations specified in the `/etc/default/grub` file shown earlier. In addition, the `cpus` option specifies the id of cores on which I/O dispatcher and I/O worker threads run. You have to specify at least two cores for this purpose: one for the I/O dispatcher thread, and one or more cores for the I/O worker thread(s).
-
-It is highly recommended to use the `isolcpus` Linux command-line configuration to avoid schedulers putting tasks on the CPUs that NVMeVirt uses:
+### Running it
 
 ```bash
-GRUB_CMDLINE_LINUX="memmap=64G\\\$128G isolcpus=7,8"
+./run_eval.sh                 # default churn 150 MiB per trial
+TOTAL_MB=300 ./run_eval.sh    # deeper steady state, slower
 ```
 
-When you are successfully load the `nvmevirt` module, you can see something like these from the system message.
+`run_eval.sh` builds the module on the host and boots a TCG VM that runs
+`fdp_eval.sh`, which builds `fdp_workload.c`, then for each trial does
+fill → snapshot → churn → snapshot and computes WAF. **Slow** — hundreds of MiB
+through an emulated device under TCG takes minutes to tens of minutes; output
+is captured to `/tmp/fdp_eval.log`. `fdp_workload.c` issues 32 KiB writes via
+the NVMe passthrough ioctl; in `fdp` mode it tags hot→PID 1, cold→PID 2
+(DTYPE=2), in `base` mode it sends no directive (all RUH 0).
 
-```log
-$ sudo dmesg
-[  144.812917] nvme nvme0: pci function 0001:10:00.0
-[  144.812975] NVMeVirt: Successfully created virtual PCI bus (node 1)
-[  144.813911] NVMeVirt: nvmev_proc_io_0 started on cpu 7 (node 1)
-[  144.813972] NVMeVirt: Successfully created Virtual NVMe device
-[  144.814032] NVMeVirt: nvmev_dispatcher started on cpu 8 (node 1)
-[  144.822075] nvme nvme0: 48/0/0 default/read/poll queues
-```
+Implementation notes baked into the harness:
+- **Device sizing for GC.** A small device (`memmap_size=64M`) with ~7% OP, so
+  GC reaches steady state at a tractable write volume. This needs
+  `BLKS_PER_PLN` small enough (128 in `ssd_config.h`) that the block size
+  scales with capacity instead of being floored at `ONESHOT_PAGE_SIZE` —
+  otherwise physical capacity inflates ~4× and GC never runs.
+- **No `awk` in the guest.** The 9p-mounted `awk` intermittently fails to load
+  under TCG; parsing uses `grep` + bash integer arithmetic instead.
 
-If you encounter a kernel panic in `__pci_enable_msix()` or in `nvme_hwmon_init()` during `insmod`, it is because the current implementation of `nvmevirt` is not compatible with IOMMU. In this case, you can either turn off Intel VT-d or IOMMU in BIOS, or disable the interrupt remapping using the grub option as shown below:
+### Results (validation run)
 
-```bash
-GRUB_CMDLINE_LINUX="memmap=64G\\\$128G intremap=off"
-```
+A short run (churn 20 MiB, 64 MiB device, 90% of writes into the 20% hot space,
+under TCG) gives:
 
-Now the emulated `nvmevirt` device is ready to be used as shown below. The actual device number (`/dev/nvme0`) can vary depending on the number of real NVMe devices in your system.
+| trial    | ΔHBMW (B) | ΔMBMW (B)  | MBE (B)    |  WAF  |
+|----------|-----------|------------|------------|-------|
+| baseline | 20971520  | 126287872  | 123731968  | 6.02  |
+| fdp      | 20971520  |  66486272  |  63438848  | 3.17  |
 
+**→ 47% write-amplification reduction with FDP.** Same host write volume in
+both trials (ΔHBMW equal); the baseline writes 6.0× that to media because GC
+copies cold data co-located with churned hot data, while FDP separates the two
+lifetimes and writes only 3.2×. A 150 MiB run gives a consistent baseline WAF
+(~6–7×). This is the headline result; lead with WAF.
 
-```bash
-$ ls -l /dev/nvme*
-crw------- 1 root root 242, 0 Feb 22 14:13 /dev/nvme0
-brw-rw---- 1 root disk 259, 5 Feb 22 14:13 /dev/nvme0n1
-```
+### Further work
 
-## Contributing
-When contributing to this repository, please first discuss the change you wish to make via [issues](https://github.com/snu-csl/nvmevirt/issues) or email(nvmevirt@gmail.com) before making a change.
+- **Publication-grade numbers.** Re-run at higher volume (`TOTAL_MB=300`+) for a
+  steadier steady state, and average a few seeds (`fdp_workload` takes a seed
+  arg) to get error bars.
+- **Parameter sweep → a curve, not a point.** Vary one axis and plot WAF:
+  hot-space % (lifetime skew), churn volume, or over-provisioning (device size
+  vs. working set). The OP sweep is the most standard FDP/GC figure.
+- **Throughput / latency.** Needs bare metal — NVMeVirt's timing model is not
+  faithful under TCG. There, 1 GiB writes finish in seconds, so larger devices
+  and deeper runs are practical.
+- **FDP events metric.** The type-0x81 (implicitly-modified-RU) event count is
+  flaky to read under TCG (the events-log read intermittently returns 0 even
+  when GC ran, as confirmed by MBE). Treat as a qualitative "GC observed" aside,
+  or validate the count on bare metal.
+- **RU-size accuracy.** Reclaim-unit nominal size is reported per FTL partition;
+  reconcile with the cross-partition striped view if it matters for the writeup.
 
-### Pull Requests
-1. Create a personal fork of the project on Github.
-2. Clone the fork on your local machine.
-3. Implement/fix your feature, comment your code.
-4. Follow the code style of this project, including indentation.
-5. Run tests using [nvmev-evaluation](https://github.com/snu-csl/nvmev-evaluation).
-6. From your fork open a pull request in our `main` branch!
-7. Please wait for the maintainer's review.
+## References
 
-
-## License
-
-NVMeVirt is offered under the terms of the GNU General Public License version 2 as published by the Free Software Foundation. More information about this license can be found [here](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html).
-
-Priority queue implementation [`pqueue/`](pqueue/) is offered under the terms of the BSD 2-clause license (GPL-compatible). (Copyright (c) 2014, Volkan Yazıcı <volkan.yazici@gmail.com>. All rights reserved.)
-
-
+- NVMe Technical Proposal 4146a: Flexible Data Placement.
+- NVMe Base Specification 2.0 — Identify Controller (CNS 0x01), Identify
+  Namespace (CNS 0x00).
+- Upstream NVMeVirt: https://github.com/snu-csl/nvmevirt
+- NVMeVirt: A Versatile Software-defined Virtual NVMe Device, USENIX FAST 2023.

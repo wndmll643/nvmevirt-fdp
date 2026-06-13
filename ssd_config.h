@@ -193,7 +193,18 @@ static_assert((ZONE_SIZE % DIES_PER_ZONE) == 0);
 #define PLNS_PER_LUN (1)
 #define FLASH_PAGE_SIZE KB(32)
 #define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 1)
-#define BLKS_PER_PLN (8192)
+/*
+ * BLKS_PER_PLN must be small enough that the derived block size (capacity /
+ * (blks_per_pl * pls * luns * chs)) stays >= ONESHOT_PAGE_SIZE. Otherwise it
+ * is rounded up to that 32 KiB floor, which inflates physical capacity far
+ * above the logical namespace -- leaving so much implicit over-provisioning
+ * that GC never runs and WAF stays 1.0 (placement shows no benefit). With 128
+ * the block size scales with the requested capacity, giving the intended ~7%
+ * OP and a GC-reachable device. #lines per partition = BLKS_PER_PLN, so keep
+ * it well above gc_thres_lines (= FDP_NR_RUH + 1). Originally 8192 (Samsung
+ * 970 Pro); lowered for the FDP evaluation. See README "Phase 6 — evaluation".
+ */
+#define BLKS_PER_PLN (128)
 #define BLK_SIZE (0) /*BLKS_PER_PLN should not be 0 */
 static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 
@@ -219,7 +230,16 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define FW_CH_XFER_LATENCY (0)
 #define OP_AREA_PERCENT (0.07)
 
-#define GLOBAL_WB_SIZE (NAND_CHANNELS * LUNS_PER_NAND_CH * ONESHOT_PAGE_SIZE * 2)
+/*
+ * Write buffer is enlarged for the synthetic evaluation. With early
+ * completion, a synchronous passthrough workload (fdp_workload.c) runs ahead
+ * of NAND drainage and fills the staging buffer; once full, writes fail and
+ * (since failed writes don't advance the simulated clock) the buffer never
+ * drains. A large buffer absorbs the run. This is pure size accounting (the
+ * struct holds only counters, no backing memory) and does not affect WAF,
+ * which is measured in the page-allocation/GC path, not the write buffer.
+ */
+#define GLOBAL_WB_SIZE (MB(256))
 #define WRITE_EARLY_COMPLETION 1
 
 #define LBA_BITS (9)
