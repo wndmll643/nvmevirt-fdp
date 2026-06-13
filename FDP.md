@@ -12,14 +12,45 @@ the existing conventional-SSD path (`conv_ftl`).
 | 3     | FDP log pages (configs, RUH usage, stats, events) + features | done |
 | 4     | Per-RUH placement: writes routed by DTYPE=Placement + DSPEC | done |
 | 5     | FDP event ring + statistics lifecycle                     | done |
-| 6     | Integration tests + workload comparison vs. conv_ftl       | not started |
+| 6     | Integration tests + workload comparison vs. conv_ftl       | functional pass (VM); WAF/GC pending bare metal |
 
 After phases 1–5 the device is a functional FDP SSD: placement-directive
 writes land in per-RUH reclaim units, non-directive writes use RUH 0, invalid
 placement IDs are rejected (and logged as FDP events), GC reclaims emit
-implicitly-modified-RU events, and the logs/features report live state. What
-remains is runtime validation (Phase 6) — everything so far is compile-tested
-only.
+implicitly-modified-RU events, and the logs/features report live state.
+
+### Validation status
+
+Functional path validated end-to-end in a virtme-ng VM (TCG, host kernel
+6.12.77, nvme-cli 2.8) via `run_vm_test.sh`:
+- Phase 1: 256 KiB write/read round-trip matches.
+- Phase 2: `CTRATT=0x80010` (FDPS + ENDGRPS), `nsfeat` bit 4, `npwg=npwa=nows=63`,
+  `endgid=1`.
+- Phase 3: all four logs + features return correct data; HBMW/MBMW counters
+  track host writes live.
+- Phase 4: `--dir-type=2 --dir-spec=N` marks RUH N host-specified; non-placement
+  writes mark RUH 0 controller-specified; `dspec=99` rejected with Invalid Field.
+- Phase 5: invalid-PID (type 0x3) event captured with correct PID and NSID.
+
+NOT yet exercised at runtime (needs GC, i.e. writing past device capacity —
+impractical under slow TCG, belongs on bare metal): the MBMW bump in
+`gc_write_page`, the MBE bump in `mark_block_free`, the type 0x81
+(implicitly-modified-RU) event, and any WAF > 1.0. These are low risk
+(one-line counter increments reusing the validated event path) but remain to
+be confirmed.
+
+Known cosmetic/semantic items:
+- RU Nominal Size is reported as one FTL partition's line (128 KiB); the
+  host-visible reclaim unit striped across `SSD_PARTITIONS` is arguably 4x that.
+- Event timestamps use `local_clock()` (ns since boot), so `nvme fdp events`
+  shows a nonsensical wall-clock date. Cosmetic.
+
+VM gotchas worth remembering (encoded in `run_vm_test.sh`):
+- Reserve memory ABOVE 4 GiB; [3,4) GiB is the PCI MMIO hole, not DRAM, and
+  reserving it leaves the BAR unbacked → controller never becomes ready.
+- `vng` runs qemu via `shell=True`, so `memmap=1G$4G` needs the `$` backslash-
+  escaped to survive that extra shell.
+- Use `--disable-kvm`; KVM is only needed for realistic timing (bare metal).
 
 ## Phase 1 — build scaffold
 
