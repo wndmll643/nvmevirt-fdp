@@ -1,0 +1,53 @@
+% LaTeX tables for the FDP-on-NVMeVirt evaluation.
+% Requires \usepackage{booktabs}. Data: docs/data/*.csv.
+
+% --- Over-provisioning sweep -------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Write amplification vs.\ over-provisioning (skew fixed at 90\% of
+  writes into the 20\% hot region). FDP's benefit peaks at moderate OP.}
+  \label{tab:fdp-op}
+  \begin{tabular}{rrrrrr}
+    \toprule
+    Working set & $\approx$OP & Base WAF & FDP WAF & Reduction & Endurance \\
+    \midrule
+    75\% & 33\% & 1.03  & 1.01  & 2\%  & 1.0$\times$ \\
+    85\% & 18\% & 2.66  & 1.40  & 47\% & 1.9$\times$ \\
+    92\% & 9\%  & 10.15 & 4.60  & 55\% & 2.2$\times$ \\
+    96\% & 4\%  & 13.41 & 11.62 & 13\% & 1.2$\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% --- Lifetime-skew sweep -----------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Write amplification vs.\ workload skew (working set fixed at 90\%).
+  More separable lifetimes yield larger FDP gains.}
+  \label{tab:fdp-skew}
+  \begin{tabular}{rrrrr}
+    \toprule
+    Hot-write \% & Base WAF & FDP WAF & Reduction & Endurance \\
+    \midrule
+    70\% & 5.74 & 3.95 & 31\% & 1.5$\times$ \\
+    85\% & 5.54 & 2.59 & 53\% & 2.1$\times$ \\
+    95\% & 5.50 & 2.17 & 61\% & 2.5$\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% --- Headline operating point ------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Operating point (90\% working set, 90\% of writes into 20\% hot
+  space): identical host writes, 47\% less media traffic under FDP.}
+  \label{tab:fdp-headline}
+  \begin{tabular}{lrrr}
+    \toprule
+    & $\Delta$HBMW & $\Delta$MBMW & WAF \\
+    \midrule
+    Baseline & 20\,MiB & 120\,MiB & 6.02 \\
+    FDP      & 20\,MiB & 63\,MiB  & 3.17 \\
+    \bottomrule
+  \end{tabular}
+\end{table}

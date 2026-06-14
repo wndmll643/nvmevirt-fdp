@@ -231,6 +231,11 @@ under "Validation status" above. The individual `nvme` commands per phase
 
 ## Phase 6 — evaluation (WAF)
 
+> Organized results for the term paper live in [`docs/`](docs/) — see
+> [`docs/results.md`](docs/results.md) for the full writeup, `docs/data/` for raw
+> CSVs, `docs/tables.tex` for paste-ready LaTeX tables, and `docs/figures/` for
+> pgfplots/matplotlib figures. This section is the summary.
+
 The quantitative result for an FDP device is the **Write Amplification Factor**,
 `WAF = MBMW / HBMW`, read straight from the FDP Statistics log. The evaluation
 compares a lifetime-separated placement workload against a baseline that mixes
@@ -296,26 +301,62 @@ under TCG) gives:
 **→ 47% write-amplification reduction with FDP.** Same host write volume in
 both trials (ΔHBMW equal); the baseline writes 6.0× that to media because GC
 copies cold data co-located with churned hot data, while FDP separates the two
-lifetimes and writes only 3.2×. A 150 MiB run gives a consistent baseline WAF
-(~6–7×). This is the headline result; lead with WAF.
+lifetimes and writes only 3.2×.
+
+### Sweep results
+
+`run_sweep.sh` runs three VM-feasible sweeps (64 MiB device, 12 MiB churn per
+point; raw data in `sweep_results.csv`). Endurance multiplier = baseline WAF /
+FDP WAF (lower media wear → proportionally longer flash life).
+
+**Over-provisioning** (working-set % of device; OP ≈ free space). Skew fixed
+(90% of writes → 20% hot space), seed 1:
+
+| working set | ~OP   | baseline WAF | FDP WAF | reduction | endurance × |
+|-------------|-------|--------------|---------|-----------|-------------|
+| 75%         | ~33%  | 1.03         | 1.01    | 2%        | 1.0×        |
+| 85%         | ~18%  | 2.66         | 1.40    | 47%       | 1.9×        |
+| 92%         | ~9%   | 10.15        | 4.60    | 55%       | 2.2×        |
+| 96%         | ~4%   | 13.41        | 11.62   | 13%       | 1.2×        |
+
+The benefit is largest at *moderate* OP (~9–18%): with lots of free space (75%)
+GC barely runs so neither WAF rises; under extreme pressure (96%) even FDP must
+copy. This non-monotonic shape is the expected FDP/GC behavior and a good figure.
+
+**Lifetime skew** (% of writes hitting the hot region). Working set 90%, seed 1:
+
+| hot-write % | baseline WAF | FDP WAF | reduction | endurance × |
+|-------------|--------------|---------|-----------|-------------|
+| 70%         | 5.74         | 3.95    | 31%       | 1.5×        |
+| 85%         | 5.54         | 2.59    | 53%       | 2.1×        |
+| 95%         | 5.50         | 2.17    | 61%       | 2.5×        |
+
+Monotonic, as expected: the more separable the workload (higher skew), the more
+FDP helps. Baseline WAF is ~flat (mixing hurts it regardless); FDP WAF falls as
+lifetimes become cleaner to separate.
+
+**Seed variance** (working set 90%, 90% hot-write): baseline 5.41 / 5.66, FDP
+2.57 / 2.38 — low variance (~±2%), so single-seed points are representative;
+add more seeds for formal error bars.
 
 ### Further work
 
-- **Publication-grade numbers.** Re-run at higher volume (`TOTAL_MB=300`+) for a
-  steadier steady state, and average a few seeds (`fdp_workload` takes a seed
-  arg) to get error bars.
-- **Parameter sweep → a curve, not a point.** Vary one axis and plot WAF:
-  hot-space % (lifetime skew), churn volume, or over-provisioning (device size
-  vs. working set). The OP sweep is the most standard FDP/GC figure.
-- **Throughput / latency.** Needs bare metal — NVMeVirt's timing model is not
-  faithful under TCG. There, 1 GiB writes finish in seconds, so larger devices
-  and deeper runs are practical.
-- **FDP events metric.** The type-0x81 (implicitly-modified-RU) event count is
-  flaky to read under TCG (the events-log read intermittently returns 0 even
-  when GC ran, as confirmed by MBE). Treat as a qualitative "GC observed" aside,
-  or validate the count on bare metal.
-- **RU-size accuracy.** Reclaim-unit nominal size is reported per FTL partition;
+- **Higher volume / more seeds** for publication-grade error bars (deeper churn
+  changes absolute WAF but the baseline-vs-FDP gap is the result).
+- **Throughput / latency** — needs bare metal; NVMeVirt's timing model is not
+  faithful under TCG. There, GiB-scale runs finish in seconds.
+- **N lifetime classes** — extend the 2-class (hot/cold) model to 3–4 temperature
+  bands over RUHs 1–4 (8 are available) to show the multi-RUH case.
+- **FDP events metric** — the type-0x81 count reads unreliably under TCG; treat
+  as a qualitative "GC observed" aside or confirm on bare metal.
+- **RU-size accuracy** — reclaim-unit nominal size is reported per FTL partition;
   reconcile with the cross-partition striped view if it matters for the writeup.
+
+> Note: virtme mounts the repo as a copy-on-write overlay, so files written by
+> the guest (e.g. `sweep_results.csv`) do not propagate to the host. The
+> harness therefore also echoes every result to stdout, which `run_sweep.sh`
+> captures to `/tmp/fdp_sweep.log` on the host; `sweep_results.csv` is
+> reconstructed from that log.
 
 ## References
 

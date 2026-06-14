@@ -6,7 +6,11 @@
 // mode, tagging it with a placement directive so hot and cold data land in
 // different reclaim unit handles.
 //
-//   usage: fdp_workload <dev> <fillbase|fillfdp|base|fdp> <churn_MB> [hot_space_pct] [hot_write_pct] [seed]
+//   usage: fdp_workload <dev> <fillbase|fillfdp|base|fdp> <churn_MB> [hot_space_pct] [hot_write_pct] [seed] [ws_pct]
+//
+//   ws_pct : working-set size as % of the device (default 90). Smaller = more
+//            free space = higher effective over-provisioning = lighter GC.
+//            This is the knob for the over-provisioning sweep.
 //
 //   fillbase / fillfdp : one-pass fill of the whole device in RANDOM order.
 //       Random order matters: with no placement (fillbase) it scatters hot and
@@ -80,6 +84,8 @@ int main(int argc, char **argv)
 	int hot_space_pct = (argc > 4) ? atoi(argv[4]) : 20;
 	int hot_write_pct = (argc > 5) ? atoi(argv[5]) : 90;
 	unsigned seed = (argc > 6) ? (unsigned)strtoul(argv[6], NULL, 10) : 1;
+	int ws_pct = (argc > 7) ? atoi(argv[7]) : 90;
+	if (ws_pct < 1 || ws_pct > 99) ws_pct = 90;
 
 	int is_fill = (strncmp(mode, "fill", 4) == 0);
 	int is_fdp = (strstr(mode, "fdp") != NULL);
@@ -89,8 +95,8 @@ int main(int argc, char **argv)
 	off_t dev_bytes = lseek(g_fd, 0, SEEK_END);
 	if (dev_bytes <= 0) { perror("lseek"); return 1; }
 
-	/* work over 90% of the device so the FTL keeps a little mapping slack */
-	uint64_t tot_ios = ((uint64_t)(dev_bytes / LBA_BYTES) / LBAS_PER_IO) * 9 / 10;
+	/* working set = ws_pct% of the device; the rest is free space (OP) */
+	uint64_t tot_ios = ((uint64_t)(dev_bytes / LBA_BYTES) / LBAS_PER_IO) * ws_pct / 100;
 	uint64_t hot_ios = tot_ios * hot_space_pct / 100;
 	if (hot_ios == 0) hot_ios = 1;
 	uint64_t cold_ios = tot_ios - hot_ios;

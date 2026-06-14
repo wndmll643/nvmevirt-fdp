@@ -1,0 +1,41 @@
+% pgfplots figures for the FDP-on-NVMeVirt evaluation.
+% Preamble: \usepackage{pgfplots}\pgfplotsset{compat=1.17}
+% Reads docs/data/*_summary.csv directly (adjust the relative path if needed).
+
+% --- Over-provisioning sweep: WAF vs working set -----------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=.8\linewidth, height=5cm,
+        xlabel={Working set (\% of device)}, ylabel={Write amplification (WAF)},
+        legend pos=north west, grid=major, mark size=2pt,
+    ]
+      \addplot table [col sep=comma, x=working_set_pct, y=base_waf] {../data/op_summary.csv};
+      \addplot table [col sep=comma, x=working_set_pct, y=fdp_waf]  {../data/op_summary.csv};
+      \legend{Baseline, FDP}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{WAF vs.\ over-provisioning. FDP's advantage is largest at moderate
+  OP; it vanishes when free space is plentiful (75\%) or nearly exhausted (96\%).}
+  \label{fig:fdp-op}
+\end{figure}
+
+% --- Lifetime-skew sweep: WAF vs hot-write fraction --------------------------
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=.8\linewidth, height=5cm,
+        xlabel={Hot-write fraction (\%)}, ylabel={Write amplification (WAF)},
+        legend pos=north east, grid=major, mark size=2pt,
+    ]
+      \addplot table [col sep=comma, x=hot_write_pct, y=base_waf] {../data/skew_summary.csv};
+      \addplot table [col sep=comma, x=hot_write_pct, y=fdp_waf]  {../data/skew_summary.csv};
+      \legend{Baseline, FDP}
+    \end{axis}
+  \end{tikzpicture}
+  \caption{WAF vs.\ workload skew. Baseline WAF is flat; FDP WAF falls as
+  lifetimes become more separable, widening the gap.}
+  \label{fig:fdp-skew}
+\end{figure}
