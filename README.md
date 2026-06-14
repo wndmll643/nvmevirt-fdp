@@ -189,9 +189,13 @@ added:
   nvme_fdp.h       # FDP-specific NVMe constants and wire-format structs
   run_vm_test.sh   # host launcher: build + boot virtme-ng VM + functional test
   fdp_vm_test.sh   # in-guest functional test (phases 1-5)
-  run_eval.sh      # host launcher for the WAF evaluation
+  run_eval.sh      # host launcher for the single-point WAF evaluation
   fdp_eval.sh      # in-guest evaluation: baseline vs FDP, computes WAF
+  run_sweep.sh     # host launcher for the OP/skew/seed sweeps
+  fdp_sweep.sh     # in-guest sweep driver, emits CSV
   fdp_workload.c   # synthetic hot/cold workload generator (NVMe passthrough)
+  docs/            # organized evaluation results (writeup, data, tables, figures)
+  paper/           # USENIX-format term-paper draft (LaTeX) + figures
   README.md        # this file
 ```
 
@@ -234,7 +238,10 @@ under "Validation status" above. The individual `nvme` commands per phase
 > Organized results for the term paper live in [`docs/`](docs/) — see
 > [`docs/results.md`](docs/results.md) for the full writeup, `docs/data/` for raw
 > CSVs, `docs/tables.tex` for paste-ready LaTeX tables, and `docs/figures/` for
-> pgfplots/matplotlib figures. This section is the summary.
+> pgfplots/matplotlib figures. The term-paper draft itself (USENIX format,
+> LaTeX) is in [`paper/`](paper/) — build with
+> `pdflatex paper && bibtex paper && pdflatex paper && pdflatex paper`.
+> This section is the summary.
 
 The quantitative result for an FDP device is the **Write Amplification Factor**,
 `WAF = MBMW / HBMW`, read straight from the FDP Statistics log. The evaluation

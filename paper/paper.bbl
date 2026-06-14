@@ -1,0 +1,55 @@
+\begin{thebibliography}{1}
+
+\bibitem{arpachiDusseau18:osbook}
+Remzi~H. Arpaci-Dusseau and Andrea~C. Arpaci-Dusseau.
+\newblock {\em Operating Systems: Three Easy Pieces}.
+\newblock Arpaci-Dusseau Books, LLC, 1.00 edition, 2018.
+\newblock \url{http://pages.cs.wisc.edu/~remzi/OSTEP/}.
+
+\bibitem{zns:atc21}
+Matias Bj{\o}rling, Abutalib Aghayev, Hans Holmberg, Aravind Ramesh, Damien~Le
+  Moal, Gregory~R. Ganger, and George Amvrosiadis.
+\newblock {ZNS}: Avoiding the block interface tax for flash-based {SSDs}.
+\newblock In {\em 2021 USENIX Annual Technical Conference (ATC)}, pages
+  689--703, 2021.
+\newblock \url{https://www.usenix.org/conference/atc21/presentation/bjorling}.
+
+\bibitem{lifetime:hotcold}
+Mei-Ling Chiang, Paul C.~H. Lee, and Ruei-Chuan Chang.
+\newblock Using data clustering to improve cleaning performance for flash
+  memory.
+\newblock {\em Software: Practice and Experience}, 29(3):267--290, 1999.
+
+\bibitem{multistream:hotstorage14}
+Jeong-Uk Kang, Jeeseok Hyun, Hyunjoo Maeng, and Sangyeun Cho.
+\newblock The multi-streamed solid-state drive.
+\newblock In {\em 6th USENIX Workshop on Hot Topics in Storage and File Systems
+  (HotStorage)}, 2014.
+\newblock
+  \url{https://www.usenix.org/conference/hotstorage14/workshop-program/presentation/kang}.
+
+\bibitem{nvmevirt:fast23}
+Sang-Hoon Kim, Jaehoon Shim, Euidong Lee, Seongyeop Jeong, Ilkueon Kang, and
+  Jin-Soo Kim.
+\newblock {NVMeVirt}: A versatile software-defined virtual {NVMe} device.
+\newblock In {\em 21st USENIX Conference on File and Storage Technologies
+  (FAST)}, pages 379--394, 2023.
+\newblock
+  \url{https://www.usenix.org/conference/fast23/presentation/kim-sang-hoon}.
+
+\bibitem{femu:fast18}
+Huaicheng Li, Mingzhe Hao, Michael~Hao Tong, Swaminathan Sundararaman, Matias
+  Bj{\o}rling, and Haryadi~S. Gunawi.
+\newblock The {CASE} of {FEMU}: Cheap, accurate, scalable and extensible flash
+  emulator.
+\newblock In {\em 16th USENIX Conference on File and Storage Technologies
+  (FAST)}, pages 83--90, 2018.
+\newblock \url{https://www.usenix.org/conference/fast18/presentation/li}.
+
+\bibitem{fdp:tp4146}
+{NVM Express}.
+\newblock {NVM Express} base specification, technical proposal 4146a: Flexible
+  data placement.
+\newblock \url{https://nvmexpress.org/}, 2022.
+
+\end{thebibliography}
