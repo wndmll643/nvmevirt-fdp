@@ -195,7 +195,7 @@ added:
   fdp_sweep.sh     # in-guest sweep driver, emits CSV
   fdp_workload.c   # synthetic hot/cold workload generator (NVMe passthrough)
   docs/            # organized evaluation results (writeup, data, tables, figures)
-  paper/           # USENIX-format term-paper draft (LaTeX) + figures
+  paper/           # IEEE-format term-paper draft (LaTeX) + figures
   README.md        # this file
 ```
 
@@ -238,9 +238,9 @@ under "Validation status" above. The individual `nvme` commands per phase
 > Organized results for the term paper live in [`docs/`](docs/) — see
 > [`docs/results.md`](docs/results.md) for the full writeup, `docs/data/` for raw
 > CSVs, `docs/tables.tex` for paste-ready LaTeX tables, and `docs/figures/` for
-> pgfplots/matplotlib figures. The term-paper draft itself (USENIX format,
+> pgfplots/matplotlib figures. The term-paper draft itself (IEEE format,
 > LaTeX) is in [`paper/`](paper/) — build with
-> `pdflatex paper && bibtex paper && pdflatex paper && pdflatex paper`.
+> `pdflatex paper_ieee && bibtex paper_ieee && pdflatex paper_ieee && pdflatex paper_ieee`.
 > This section is the summary.
 
 The quantitative result for an FDP device is the **Write Amplification Factor**,

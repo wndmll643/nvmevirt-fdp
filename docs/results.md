@@ -122,19 +122,32 @@ RocksDB-on-FDP "one level per reclaim unit" mapping, generated from the level
 geometry rather than a live RocksDB (self-contained, no external trace).
 
 The sweep varies how many RUHs hold the levels (1 = single reclaim unit ≈
-baseline, up to one per level). Run it with `./run_lsm.sh`; results land in
-`lsm_results.csv` → summarized in [`data/lsm_summary.csv`](data/lsm_summary.csv)
-→ `fig_lsm_ruh.pdf`.
+baseline, up to one per level). Run it with `./run_lsm.sh` (default fanout
+`T=4`, `L=4` levels, 30 MiB churn, 64 MiB device); raw data in
+[`data/lsm_results.csv`](data/lsm_results.csv), summary in
+[`data/lsm_summary.csv`](data/lsm_summary.csv), figure `fig_lsm_ruh.pdf`.
 
-> **Status: numbers in `lsm_summary.csv` are ILLUSTRATIVE placeholders** (shape
-> only — baseline flat, FDP falling with a knee) so the figure/paper build now.
-> Replace with the real `run_lsm.sh` output before submission, then re-run
-> `paper/make_figs.py`.
+**Results** (real run, 6.12.77 guest under TCG):
 
-Expected shape (to confirm on the run): baseline flat (placement-agnostic); FDP
-WAF non-increasing in #RUHs; N=1 ≈ baseline (sanity); the first split (isolating
-the fast-churning top level) captures most of the gain, with diminishing returns
-toward one-RUH-per-level.
+| #RUHs | baseline WAF | FDP WAF | reduction | endurance × |
+|-------|--------------|---------|-----------|-------------|
+| 1     | 6.58         | 6.58    | 0%        | 1.00×       |
+| 2     | 6.58         | 5.66    | 14%       | 1.16×       |
+| 3     | 6.58         | 4.96    | 25%       | 1.33×       |
+| 4     | 6.58         | 4.32    | 34%       | 1.52×       |
+
+All sanity checks pass: the baseline is N-independent; FDP at N=1 reproduces the
+baseline WAF (6.58) exactly — one reclaim unit can separate nothing; FDP WAF
+falls monotonically as levels are separated; and there is a clear knee — the
+first split (isolating the fast-churning top level) is the largest single step
+(Δ0.92), with diminishing returns after (Δ0.70, Δ0.64).
+
+The 34% reduction at one-RUH-per-level is smaller than the two-class operating
+point (47%): leveled compaction spreads churn across all levels (≈equal merge
+bytes per level), so it is less skewed than a concentrated 90%→20% hot/cold
+split. The effect is nonetheless substantial and, unlike the synthetic sweeps,
+arises from the data structure's own geometry. A deeper churn (`CHURN_MB=50`)
+would push further toward steady state and likely widen the gap.
 
 ## 4. Takeaways for the paper
 

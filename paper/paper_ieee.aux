@@ -1,0 +1,97 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{arpachiDusseau18:osbook}
+\citation{lifetime:hotcold}
+\citation{lfs:tocs92}
+\citation{fdp:tp4146}
+\citation{zns:atc21}
+\citation{multistream:hotstorage14}
+\citation{femu:fast18}
+\citation{mqsim:fast18}
+\citation{nvmevirt:fast23}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {II}Background and Motivation}{1}{section.2}\protected@file@percent }
+\newlabel{sec:bg}{{II}{1}{Background and Motivation}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}Garbage collection and write amplification}{1}{subsection.2.1}\protected@file@percent }
+\citation{fdp:tp4146}
+\citation{lfs:tocs92}
+\citation{lifetime:hotcold}
+\citation{multistream:hotstorage14}
+\citation{autostream:systor17}
+\citation{fstream:fast18}
+\citation{pcstream:fast19}
+\citation{fdp:tp4146}
+\citation{lightnvm:fast17}
+\citation{zns:atc21}
+\citation{wisckey:fast16}
+\citation{f2fs:fast15}
+\citation{multistream:hotstorage14}
+\citation{lightnvm:fast17}
+\citation{zns:atc21}
+\citation{fdp:tp4146}
+\citation{femu:fast18}
+\citation{mqsim:fast18}
+\citation{nvmevirt:fast23}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Lifetime mixing. Without placement, hot rewrites strand cold survivors in many lines, forcing repeated GC copies; FDP places lifetimes in separate lines, so a hot line is reclaimed with no copying.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:concept}{{1}{2}{Lifetime mixing. Without placement, hot rewrites strand cold survivors in many lines, forcing repeated GC copies; FDP places lifetimes in separate lines, so a hot line is reclaimed with no copying}{figure.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Why placement helps: the mixing problem}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-C}}NVMe Flexible Data Placement}{2}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}Related Work}{2}{section.3}\protected@file@percent }
+\newlabel{sec:related}{{III}{2}{Related Work}{section.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Host-directed placement interfaces.}}{2}{table.1}\protected@file@percent }
+\newlabel{tab:taxonomy}{{I}{2}{Host-directed placement interfaces}{table.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {IV}NVMeVirt FDP Extension}{2}{section.4}\protected@file@percent }
+\newlabel{sec:design}{{IV}{2}{NVMeVirt FDP Extension}{section.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces The FDP target reuses NVMeVirt's PCIe front end, dispatcher, and the conventional FTL's lines, garbage collection, and timing model. The shaded boxes are the only additions: the FDP control surface and the per-RUH write frontiers.}}{3}{figure.2}\protected@file@percent }
+\newlabel{fig:arch}{{2}{3}{The FDP target reuses NVMeVirt's PCIe front end, dispatcher, and the conventional FTL's lines, garbage collection, and timing model. The shaded boxes are the only additions: the FDP control surface and the per-RUH write frontiers}{figure.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Methodology}{3}{section.5}\protected@file@percent }
+\newlabel{sec:method}{{V}{3}{Methodology}{section.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Experimental configuration.}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:params}{{II}{3}{Experimental configuration}{table.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Evaluation}{3}{section.6}\protected@file@percent }
+\newlabel{sec:eval}{{VI}{3}{Evaluation}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-A}}Write-amplification reduction}{3}{subsection.6.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Operating point: identical host writes, 47\% less media traffic and 49\% fewer erased bytes under FDP.}}{4}{table.3}\protected@file@percent }
+\newlabel{tab:headline}{{III}{4}{Operating point: identical host writes, 47\% less media traffic and 49\% fewer erased bytes under FDP}{table.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces WAF vs.\ over-provisioning (working-set size, fixed skew). FDP's advantage peaks at moderate OP and shrinks at both extremes.}}{4}{figure.3}\protected@file@percent }
+\newlabel{fig:op}{{3}{4}{WAF vs.\ over-provisioning (working-set size, fixed skew). FDP's advantage peaks at moderate OP and shrinks at both extremes}{figure.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-B}}Effect of over-provisioning}{4}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-C}}Effect of workload skew}{4}{subsection.6.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces WAF vs.\ workload skew (hot-write fraction, fixed working set). Baseline is flat; FDP improves monotonically as lifetimes separate.}}{4}{figure.4}\protected@file@percent }
+\newlabel{fig:skew}{{4}{4}{WAF vs.\ workload skew (hot-write fraction, fixed working set). Baseline is flat; FDP improves monotonically as lifetimes separate}{figure.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Endurance gain ($\mathrm  {WAF}_{\text  {base}}/\mathrm  {WAF}_{\text  {FDP}}$) across the skew sweep, reaching $2.5\times $ at the most separable point.}}{4}{figure.5}\protected@file@percent }
+\newlabel{fig:endurance}{{5}{4}{Endurance gain ($\mathrm {WAF}_{\text {base}}/\mathrm {WAF}_{\text {FDP}}$) across the skew sweep, reaching $2.5\times $ at the most separable point}{figure.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-D}}Variance}{4}{subsection.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-E}}A RocksDB-like LSM workload}{4}{subsection.6.5}\protected@file@percent }
+\newlabel{sec:lsm}{{\mbox  {VI-E}}{4}{A RocksDB-like LSM workload}{subsection.6.5}{}}
+\bibstyle{IEEEtran}
+\bibdata{refs}
+\bibcite{arpachiDusseau18:osbook}{1}
+\bibcite{lifetime:hotcold}{2}
+\bibcite{lfs:tocs92}{3}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Seed variance at the operating point ($\pm 2\%$).}}{5}{table.4}\protected@file@percent }
+\newlabel{tab:var}{{IV}{5}{Seed variance at the operating point ($\pm 2\%$)}{table.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Consolidated sweep results. OP sweep at fixed 90\% skew; skew sweep at fixed 90\% working set.}}{5}{table.5}\protected@file@percent }
+\newlabel{tab:sweep}{{V}{5}{Consolidated sweep results. OP sweep at fixed 90\% skew; skew sweep at fixed 90\% working set}{table.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-F}}Discussion and limitations}{5}{subsection.6.6}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces RocksDB-like LSM workload: WAF vs.\ the number of reclaim unit handles used to separate LSM levels. One handle reproduces the baseline; the first split gives the largest single gain, and one handle per level cuts WAF by 34\%.}}{5}{figure.6}\protected@file@percent }
+\newlabel{fig:lsm}{{6}{5}{RocksDB-like LSM workload: WAF vs.\ the number of reclaim unit handles used to separate LSM levels. One handle reproduces the baseline; the first split gives the largest single gain, and one handle per level cuts WAF by 34\%}{figure.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {VI}{\ignorespaces RocksDB-like LSM workload ($T{=}4$, 4 levels): WAF vs.\ reclaim unit handles used. $N{=}1$ (single reclaim unit) reproduces the baseline.}}{5}{table.6}\protected@file@percent }
+\newlabel{tab:lsm}{{VI}{5}{RocksDB-like LSM workload ($T{=}4$, 4 levels): WAF vs.\ reclaim unit handles used. $N{=}1$ (single reclaim unit) reproduces the baseline}{table.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{5}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{References}{5}{section*.1}\protected@file@percent }
+\bibcite{fdp:tp4146}{4}
+\bibcite{zns:atc21}{5}
+\bibcite{multistream:hotstorage14}{6}
+\bibcite{femu:fast18}{7}
+\bibcite{mqsim:fast18}{8}
+\bibcite{nvmevirt:fast23}{9}
+\bibcite{autostream:systor17}{10}
+\bibcite{fstream:fast18}{11}
+\bibcite{pcstream:fast19}{12}
+\bibcite{lightnvm:fast17}{13}
+\bibcite{wisckey:fast16}{14}
+\bibcite{f2fs:fast15}{15}
+\gdef \@abspage@last{6}
