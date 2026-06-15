@@ -110,6 +110,32 @@ Two seeds at the operating point (WS 90%, hot-write 90%). Data:
 Spread ≈ ±2%, so single-seed points are representative. Add more seeds for
 formal error bars in the final paper.
 
+### 3.5 RocksDB-like LSM workload (number of RUHs)
+
+A realism check that also exercises **more than two RUHs**. Instead of a
+hot/cold split, the device is driven by an I/O stream modeled on an LSM-tree
+under leveled compaction (`lsm_workload.c`): level *i* occupies a band of size
+∝ `T^i` (fanout `T`, default 4), so the **level is the lifetime class** — the
+top level is small and churns fast, the bottom level is large and is rarely
+rewritten, with adjacent levels separated by ≈`T`. This is exactly the
+RocksDB-on-FDP "one level per reclaim unit" mapping, generated from the level
+geometry rather than a live RocksDB (self-contained, no external trace).
+
+The sweep varies how many RUHs hold the levels (1 = single reclaim unit ≈
+baseline, up to one per level). Run it with `./run_lsm.sh`; results land in
+`lsm_results.csv` → summarized in [`data/lsm_summary.csv`](data/lsm_summary.csv)
+→ `fig_lsm_ruh.pdf`.
+
+> **Status: numbers in `lsm_summary.csv` are ILLUSTRATIVE placeholders** (shape
+> only — baseline flat, FDP falling with a knee) so the figure/paper build now.
+> Replace with the real `run_lsm.sh` output before submission, then re-run
+> `paper/make_figs.py`.
+
+Expected shape (to confirm on the run): baseline flat (placement-agnostic); FDP
+WAF non-increasing in #RUHs; N=1 ≈ baseline (sanity); the first split (isolating
+the fast-churning top level) captures most of the gain, with diminishing returns
+toward one-RUH-per-level.
+
 ## 4. Takeaways for the paper
 
 1. FDP reduces write amplification by **up to ~61%** (≈**2.5× endurance**) on a
@@ -126,8 +152,10 @@ formal error bars in the final paper.
 
 - **Timing not modeled here.** TCG is not latency-faithful; WAF/endurance are
   valid (logic-only), but throughput and tail-latency need a bare-metal run.
-- **Synthetic workload.** Two-class hot/cold is the standard lifetime model;
-  real applications (e.g. RocksDB levels) would strengthen external validity.
+- **Generated workloads.** The two-class sweeps use the standard hot/cold model;
+  the LSM experiment (§3.5) is driven by a model of leveled compaction rather
+  than a live RocksDB. Replaying a captured application trace would strengthen
+  external validity further.
 - **Small device (64 MiB)** for tractable GC under emulation; trends are
   geometry-independent but absolute WAF scales with OP and working set.
 - **FDP event counts** (type 0x81) read unreliably under TCG and are reported
@@ -139,8 +167,10 @@ formal error bars in the final paper.
 ```bash
 ./run_eval.sh                 # single operating-point WAF (Section 3.1)
 ./run_sweep.sh                # OP + skew + seed sweeps (Sections 3.2-3.4)
+./run_lsm.sh                  # RocksDB-like LSM #RUH sweep (Section 3.5)
 TOTAL_MB=300 ./run_eval.sh    # deeper churn
 CHURN_MB=20 ./run_sweep.sh    # deeper per-point churn
+CHURN_MB=50 ./run_lsm.sh      # deeper LSM churn (closer to steady state)
 ```
 
 Both build the module on the host, boot a TCG VM, run the workload, and print
